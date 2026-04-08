@@ -587,6 +587,14 @@ elif st.session_state.page == "results":
     mvp_std, tan_std = select_key_portfolios(df_all)
     mvp_esg, tan_esg = select_key_portfolios(df_esg)
 
+    # --- NEW: METRICS ROW ---
+    # This displays the KPIs at the very top of the results
+    m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+    m_col1.metric("ESG Cutoff", f"{esg_cutoff*100:.1f}/100", f"λ = {lambda_esg:.2f}")
+    m_col2.metric("Tangency Return", f"{tan_std['Expected Return']*100:.1f}%", f"Sharpe {tan_std['Sharpe Ratio']:.3f}")
+    m_col3.metric("MVP Std Dev", f"{mvp_std['Std Dev']*100:.1f}%")
+    m_col4.metric("ESG Tangency", f"{tan_esg['Expected Return']*100:.1f}%", "Post-screen")
+    
     std_summary = summary_df(mvp_std, tan_std, ("Minimum Variance Portfolio", "Tangency Portfolio"))
     esg_summary = summary_df(mvp_esg, tan_esg, ("ESG Minimum Variance Portfolio", "ESG Tangency Portfolio"))
 
