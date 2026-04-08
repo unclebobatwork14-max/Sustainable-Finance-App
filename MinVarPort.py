@@ -714,12 +714,47 @@ if not st.session_state.onboarding_complete:
 if st.session_state.page == "inputs":
     if is_experienced_find_mode():
         st.title("Asset Finder Preferences")
-        st.caption("Experienced Investor path: choose your preferences and the app will only show the stock-universe frontier tab.")
+        st.caption("Experienced Investor path: choose your risk profile and ESG preferences below. The app will only show the stock-universe frontier tab.")
 
         with st.form("stock_finder_form"):
-            st.subheader("Investor preferences")
-            lambda_esg = st.slider("ESG preference intensity λ", 0.0, 1.0, float(st.session_state.lambda_esg), 0.01)
-            gamma = st.number_input("Risk aversion γ", 0.0, 50.0, float(st.session_state.gamma), 0.10, format="%.2f")
+            st.subheader("Risk profile")
+            risk_choice = st.radio(
+                "How risk averse are you?",
+                ["Aggressive", "Balanced", "Conservative", "Custom"],
+                index=1 if st.session_state.risk_profile not in ["Aggressive", "Balanced", "Conservative", "Custom"] else ["Aggressive", "Balanced", "Conservative", "Custom"].index(st.session_state.risk_profile),
+                key="experienced_find_risk_choice",
+            )
+
+            custom_gamma = float(st.session_state.gamma)
+            if risk_choice == "Custom":
+                custom_gamma = st.slider(
+                    "Select your custom risk aversion value",
+                    min_value=0.5,
+                    max_value=10.0,
+                    value=float(min(max(st.session_state.gamma, 0.5), 10.0)),
+                    step=0.1,
+                    key="experienced_find_custom_gamma",
+                )
+
+            st.markdown("---")
+            st.subheader("ESG preferences")
+            esg_choice = st.radio(
+                "Please select a number that reflects your ESG preferences:",
+                ["Low ESG Impact", "Medium ESG Impact", "High ESG Impact", "Custom"],
+                index=1 if st.session_state.esg_profile not in ["Low ESG Impact", "Medium ESG Impact", "High ESG Impact", "Custom"] else ["Low ESG Impact", "Medium ESG Impact", "High ESG Impact", "Custom"].index(st.session_state.esg_profile),
+                key="experienced_find_esg_choice",
+            )
+
+            custom_lambda = float(st.session_state.lambda_esg)
+            if esg_choice == "Custom":
+                custom_lambda = st.slider(
+                    "Select your custom ESG intensity value",
+                    min_value=0.0,
+                    max_value=1.0,
+                    value=float(min(max(st.session_state.lambda_esg, 0.0), 1.0)),
+                    step=0.01,
+                    key="experienced_find_custom_lambda",
+                )
 
             st.markdown("---")
             st.subheader("Firm-level frontier settings")
@@ -729,8 +764,13 @@ if st.session_state.page == "inputs":
             submitted = st.form_submit_button("Continue to stock finder")
 
         if submitted:
-            st.session_state.lambda_esg = lambda_esg
-            st.session_state.gamma = gamma
+            gamma_value = float(custom_gamma) if risk_choice == "Custom" else RISK_MAP[risk_choice]
+            lambda_value = float(custom_lambda) if esg_choice == "Custom" else ESG_MAP[esg_choice]
+
+            st.session_state.gamma = gamma_value
+            st.session_state.lambda_esg = lambda_value
+            st.session_state.risk_profile = risk_choice
+            st.session_state.esg_profile = esg_choice
             st.session_state.frontier_points = frontier_points
             st.session_state.trading_days = trading_days
             go_to("results")
