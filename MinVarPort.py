@@ -690,7 +690,22 @@ def audit_two_asset_solution(
     }
 
 
-@st.cache_data
+def build_two_asset_risky_frontier(
+    mu: np.ndarray,
+    sigma: np.ndarray,
+    rho: float,
+    rf: float,
+    esg_scores: np.ndarray,
+    mix_points: int,
+) -> pd.DataFrame:
+    cov = var_covar(sigma, rho)
+    rows = []
+    for p1 in np.linspace(0.0, 1.0, mix_points):
+        p = np.array([p1, 1.0 - p1], dtype=float)
+        risky_return = float(np.dot(p, mu))
+        variance = float(np.dot(p, np.dot(cov, p)))
+        std_dev = float(np.sqrt(max(variance, 0.0)))
+        avg_esg = float(np.dot(p, esg
 def sample_simplex_cloud(n_assets: int, n_samples: int, seed: int = 123) -> np.ndarray:
     rng = np.random.default_rng(seed)
     cloud = rng.dirichlet(np.ones(n_assets), size=n_samples)
