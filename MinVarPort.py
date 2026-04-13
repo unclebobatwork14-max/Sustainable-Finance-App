@@ -762,6 +762,96 @@ def build_stock_objective_cloud(
     return pd.DataFrame(rows)
 
 
+def invert_covariance(cov: np.ndarray) -> np.ndarray:
+    cov = np.asarray(cov, dtype=float)
+    cov = (cov + cov.T) / 2.0
+    cov = cov + np.eye(cov.shape[0]) * 1e-10
+    return np.linalg.pinv(cov)
+
+
+def frontier_constants(mu: np.ndarray, cov: np.ndarray):
+    inv_cov = invert_covariance(cov)
+    ones = np.ones(len(mu))
+    A = float(ones @ inv_cov @ ones)
+    B = float(ones @ inv_cov @ mu)
+    C = float(mu @ inv_cov @ mu)
+    D = max(A * C - B**2, 1e-12)
+    return inv_cov, ones, A, B, C, D
+
+
+def gmv_weights_frontier(mu: np.ndarray, cov: np.ndarray) -> np.ndarray:
+    inv_cov, ones, A, _, _, _ = frontier_constants(mu, cov)
+    return (inv_cov @ ones) / A
+
+
+def target_return_weights_frontier(mu: np.ndarray, cov: np.ndarray, target_return: float) -> np.ndarray:
+    inv_cov, ones, A, B, C, D = frontier_constants(mu, cov)
+    alpha = (C - B * target_return) / D
+    beta = (A * target_return - B) / D
+    return inv_cov @ (alpha * ones + beta * mu)
+
+
+def build_risky_frontier_visual(
+    mu: np.ndarray,
+    cov: np.ndarray,
+    esg_scores: np.ndarray,
+    rf: float,
+    frontier_points: int = 80,
+):
+    mu = np.asarray(mu, dtype=float)
+    cov = np.asarray(cov, dtype=float)
+    esg_scores = np.asarray(esg_scores, dtype=float)
+
+    w_gmv = gmv_weights_frontier(mu, cov)
+    gmv_return = float(w_gmv @ mu)
+    gmv_variance = float(w_gmv @ cov @ w_gmv)
+    gmv_std = float(np.sqrt(max(gmv_variance, 0.0)))
+    gmv_esg = float(w_gmv @ esg_scores)
+    gmv_sharpe = np.nan if gmv_std <= 1e-12 else (gmv_return - rf) / gmv_std
+
+    target_min = float(min(mu.min(), gmv_return))
+    target_max = float(max(mu.max(), gmv_return))
+    if np.isclose(target_min, target_max):
+        target_max = target_min + 1e-6
+
+    rows = []
+    for target in np.linspace(target_min, target_max, frontier_points):
+        w = target_return_weights_frontier(mu, cov, target)
+        exp_return = float(w @ mu)
+        variance = float(w @ cov @ w)
+        std_dev = float(np.sqrt(max(variance, 0.0)))
+        avg_esg = float(w @ esg_scores)
+        sharpe = np.nan if std_dev <= 1e-12 else (exp_return - rf) / std_dev
+        rows.append(
+            {
+                "Expected Return": exp_return,
+                "Risky Return": exp_return,
+                "Variance": variance,
+                "Std Dev": std_dev,
+                "Average ESG": avg_esg,
+                "Sharpe Ratio": sharpe,
+            }
+        )
+
+    frontier = pd.DataFrame(rows).sort_values("Std Dev").reset_index(drop=True)
+    frontier["Efficient"] = frontier["Expected Return"] >= gmv_return - 1e-12
+    gmv = {
+        "Expected Return": gmv_return,
+        "Risky Return": gmv_return,
+        "Variance": gmv_variance,
+        "Std Dev": gmv_std,
+        "Average ESG": gmv_esg,
+        "Sharpe Ratio": gmv_sharpe,
+        "Weights": w_gmv,
+    }
+    return frontier, gmv
+
+
+def min_esg_cutoff_from_scores(scores: np.ndarray, lambda_esg: float) -> float:
+    scores = np.asarray(scores, dtype=float)
+    return float(np.min(scores) + lambda_esg * (np.max(scores) - np.min(scores)))
+
+
 # =========================================================
 # Formatting helpers
 # =========================================================
@@ -896,6 +986,186 @@ def render_theoretical_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg, mi
 
 
 def render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg, mix_points):
+    if st.session_state.beginner_mode or is_experienced_find_mode():
+        try:
+            firms, daily_cov, corr = load_fast_workbook()
+            annual_cov = annualise_covariance(daily_cov, st.session_state.trading_days)
+
+            mu_all = firms["Expected Return"].to_numpy(dtype=float)
+            esg_all = firms["ESG Score"].to_numpy(dtype=float)
+            cov_all = annual_cov.loc[firms["Ticker"], firms["Ticker"]].to_numpy(dtype=float)
+
+            benchmark_opt, _ = solve_optimal_portfolio(
+                mu=mu_all,
+                cov=cov_all,
+                esg_scores=esg_all,
+                gamma=gamma,
+                lambda_esg=0.0,
+                rf=rf,
+                asset_names=firms["Ticker"].tolist(),
+            )
+            esg_opt, _ = solve_optimal_portfolio(
+                mu=mu_all,
+                cov=cov_all,
+                esg_scores=esg_all,
+                gamma=gamma,
+                lambda_esg=lambda_esg,
+                rf=rf,
+                asset_names=firms["Ticker"].tolist(),
+            )
+
+            frontier_all, gmv_all = build_risky_frontier_visual(
+                mu=mu_all,
+                cov=cov_all,
+                esg_scores=esg_all,
+                rf=rf,
+                frontier_points=max(60, min(200, mix_points // 10)),
+            )
+
+            cutoff = min_esg_cutoff_from_scores(esg_all, lambda_esg)
+            firms_esg = firms[firms["ESG Score"] >= cutoff].copy().reset_index(drop=True)
+
+            st.subheader("Frontier and CML visualisation")
+            st.caption(
+                "For first-time users and investors asking for an asset combination, these graphs are built from all stocks in the workbook. The ESG frontier uses only the stocks that meet the minimum ESG cutoff."
+            )
+            st.write(f"Stocks available in workbook: **{len(firms)}**")
+            st.write(f"Stocks meeting ESG cutoff: **{len(firms_esg)}**")
+
+            if len(firms_esg) < 2:
+                st.warning("Fewer than 2 stocks meet the ESG cutoff, so the ESG frontier cannot be plotted reliably.")
+                return
+
+            mu_esg = firms_esg["Expected Return"].to_numpy(dtype=float)
+            esg_esg = firms_esg["ESG Score"].to_numpy(dtype=float)
+            cov_esg = annual_cov.loc[firms_esg["Ticker"], firms_esg["Ticker"]].to_numpy(dtype=float)
+            frontier_esg, gmv_esg = build_risky_frontier_visual(
+                mu=mu_esg,
+                cov=cov_esg,
+                esg_scores=esg_esg,
+                rf=rf,
+                frontier_points=max(60, min(200, mix_points // 10)),
+            )
+
+            tan_all = tangency_from_frontier(frontier_all)
+            mvp_all = min_variance_from_frontier(frontier_all)
+            tan_esg = tangency_from_frontier(frontier_esg)
+            mvp_esg = min_variance_from_frontier(frontier_esg)
+
+            fig1, ax1 = plt.subplots(figsize=(10, 6))
+            plot_frontier_cml(
+                ax=ax1,
+                frontier_df=frontier_all,
+                rf=rf,
+                color=THEORETICAL_BLUE,
+                label="Mean-variance frontier (all stocks)",
+                tangency_label="highest Sharpe portfolio",
+            )
+            ax1.scatter([benchmark_opt["Std Dev"] * 100], [benchmark_opt["Expected Return"] * 100], color=THEORETICAL_BLUE, s=65, zorder=5)
+            ax1.scatter([mvp_all["Std Dev"] * 100], [mvp_all["Risky Return"] * 100], color=THEORETICAL_BLUE, marker="s", s=55, zorder=5)
+            ax1.annotate(
+                "objective-optimal portfolio",
+                xy=(benchmark_opt["Std Dev"] * 100, benchmark_opt["Expected Return"] * 100),
+                xytext=(-90, 12),
+                textcoords="offset points",
+                color=THEORETICAL_BLUE,
+                fontsize=9,
+                arrowprops=dict(arrowstyle="->", color=THEORETICAL_BLUE, lw=1.2),
+            )
+            ax1.annotate(
+                "minimum variance portfolio",
+                xy=(mvp_all["Std Dev"] * 100, mvp_all["Risky Return"] * 100),
+                xytext=(15, -18),
+                textcoords="offset points",
+                color=THEORETICAL_BLUE,
+                fontsize=9,
+                arrowprops=dict(arrowstyle="->", color=THEORETICAL_BLUE, lw=1.1),
+            )
+            ax1.set_xlabel("Std")
+            ax1.set_ylabel("Expected return")
+            ax1.set_title("All-stock frontier without ESG consideration")
+            style_axis(ax1)
+            st.pyplot(fig1)
+
+            fig2, ax2 = plt.subplots(figsize=(10, 6))
+            ax2.plot(frontier_all["Std Dev"] * 100, frontier_all["Risky Return"] * 100, color=THEORETICAL_BLUE, linewidth=2.1, alpha=0.7)
+            plot_frontier_cml(
+                ax=ax2,
+                frontier_df=frontier_esg,
+                rf=rf,
+                color=ESG_GREEN,
+                label="ESG frontier",
+                tangency_label="ESG highest Sharpe portfolio",
+            )
+            ax2.scatter([esg_opt["Std Dev"] * 100], [esg_opt["Expected Return"] * 100], color=ESG_GREEN, s=65, zorder=5)
+            ax2.scatter([mvp_esg["Std Dev"] * 100], [mvp_esg["Risky Return"] * 100], color=ESG_GREEN, marker="s", s=55, zorder=5)
+            ax2.annotate(
+                "objective-optimal portfolio",
+                xy=(esg_opt["Std Dev"] * 100, esg_opt["Expected Return"] * 100),
+                xytext=(18, -16),
+                textcoords="offset points",
+                color=ESG_GREEN,
+                fontsize=9,
+                arrowprops=dict(arrowstyle="->", color=ESG_GREEN, lw=1.2),
+            )
+            ax2.annotate(
+                "ESG minimum variance portfolio",
+                xy=(mvp_esg["Std Dev"] * 100, mvp_esg["Risky Return"] * 100),
+                xytext=(-120, 12),
+                textcoords="offset points",
+                color=ESG_GREEN,
+                fontsize=9,
+                arrowprops=dict(arrowstyle="->", color=ESG_GREEN, lw=1.1),
+            )
+            ax2.set_xlabel("Std")
+            ax2.set_ylabel("Expected return")
+            ax2.set_title("ESG frontier from stocks meeting the minimum ESG criterion")
+            style_axis(ax2)
+            st.pyplot(fig2)
+
+            fig3, ax3 = plt.subplots(figsize=(10, 6))
+            ax3.plot(frontier_all["Std Dev"] * 100, frontier_all["Risky Return"] * 100, color=THEORETICAL_BLUE, linewidth=2.2)
+            ax3.plot(frontier_esg["Std Dev"] * 100, frontier_esg["Risky Return"] * 100, color=ESG_GREEN, linewidth=2.2)
+            ax3.scatter([mvp_all["Std Dev"] * 100], [mvp_all["Risky Return"] * 100], color=THEORETICAL_BLUE, marker="s", s=60, zorder=5)
+            ax3.scatter([tan_all["Std Dev"] * 100], [tan_all["Risky Return"] * 100], color=THEORETICAL_BLUE, marker="*", s=110, zorder=5)
+            ax3.scatter([mvp_esg["Std Dev"] * 100], [mvp_esg["Risky Return"] * 100], color=ESG_GREEN, marker="s", s=60, zorder=5)
+            ax3.scatter([tan_esg["Std Dev"] * 100], [tan_esg["Risky Return"] * 100], color=ESG_GREEN, marker="*", s=110, zorder=5)
+            ax3.annotate("MVP without ESG", xy=(mvp_all["Std Dev"] * 100, mvp_all["Risky Return"] * 100), xytext=(14, -18), textcoords="offset points", color=THEORETICAL_BLUE, fontsize=9)
+            ax3.annotate("Highest Sharpe without ESG", xy=(tan_all["Std Dev"] * 100, tan_all["Risky Return"] * 100), xytext=(-120, 10), textcoords="offset points", color=THEORETICAL_BLUE, fontsize=9)
+            ax3.annotate("MVP with ESG", xy=(mvp_esg["Std Dev"] * 100, mvp_esg["Risky Return"] * 100), xytext=(14, 8), textcoords="offset points", color=ESG_GREEN, fontsize=9)
+            ax3.annotate("Highest Sharpe with ESG", xy=(tan_esg["Std Dev"] * 100, tan_esg["Risky Return"] * 100), xytext=(16, -16), textcoords="offset points", color=ESG_GREEN, fontsize=9)
+            ax3.set_xlabel("Std")
+            ax3.set_ylabel("Expected return")
+            ax3.set_title("Minimum variance and highest Sharpe portfolios")
+            style_axis(ax3)
+            st.pyplot(fig3)
+
+            st.dataframe(
+                pd.DataFrame([
+                    {
+                        "ESG cutoff used": cutoff,
+                        "MVP without ESG": float(mvp_all["Risky Return"]),
+                        "Highest Sharpe without ESG": float(tan_all["Risky Return"]),
+                        "MVP with ESG": float(mvp_esg["Risky Return"]),
+                        "Highest Sharpe with ESG": float(tan_esg["Risky Return"]),
+                    }
+                ]).style.format(
+                    {
+                        "ESG cutoff used": "{:.2%}",
+                        "MVP without ESG": "{:.2%}",
+                        "Highest Sharpe without ESG": "{:.2%}",
+                        "MVP with ESG": "{:.2%}",
+                        "Highest Sharpe with ESG": "{:.2%}",
+                    }
+                ),
+                use_container_width=True,
+            )
+            return
+
+        except Exception as e:
+            st.error(f"Could not build the frontier visualisation from the workbook: {e}")
+            return
+
     cov = var_covar(sigma, rho)
 
     benchmark_opt, _ = solve_optimal_portfolio(
@@ -930,7 +1200,7 @@ def render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg
 
     st.subheader("Frontier and CML visualisation")
     st.caption(
-        "These graphs are visual aids. The optimisation itself still follows the corrected objective function with risky weights that do not need to sum to one."
+        "These graphs are visual aids. For experienced investors who already have their own inputs, they are built from the theoretical 2-asset model."
     )
 
     fig1, ax1 = plt.subplots(figsize=(10, 6))
@@ -942,21 +1212,8 @@ def render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg
         label="Mean-variance frontier (without ESG screen)",
         tangency_label="highest Sharpe portfolio",
     )
-    ax1.scatter(
-        [benchmark_opt["Std Dev"] * 100],
-        [benchmark_opt["Expected Return"] * 100],
-        color=THEORETICAL_BLUE,
-        s=65,
-        zorder=5,
-    )
-    ax1.scatter(
-        [mvp_all["Std Dev"] * 100],
-        [mvp_all["Risky Return"] * 100],
-        color=THEORETICAL_BLUE,
-        marker="s",
-        s=55,
-        zorder=5,
-    )
+    ax1.scatter([benchmark_opt["Std Dev"] * 100], [benchmark_opt["Expected Return"] * 100], color=THEORETICAL_BLUE, s=65, zorder=5)
+    ax1.scatter([mvp_all["Std Dev"] * 100], [mvp_all["Risky Return"] * 100], color=THEORETICAL_BLUE, marker="s", s=55, zorder=5)
     ax1.annotate(
         "objective-optimal portfolio",
         xy=(benchmark_opt["Std Dev"] * 100, benchmark_opt["Expected Return"] * 100),
@@ -982,13 +1239,7 @@ def render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg
     st.pyplot(fig1)
 
     fig2, ax2 = plt.subplots(figsize=(10, 6))
-    ax2.plot(
-        frontier_all["Std Dev"] * 100,
-        frontier_all["Risky Return"] * 100,
-        color=THEORETICAL_BLUE,
-        linewidth=2.1,
-        alpha=0.7,
-    )
+    ax2.plot(frontier_all["Std Dev"] * 100, frontier_all["Risky Return"] * 100, color=THEORETICAL_BLUE, linewidth=2.1, alpha=0.7)
     plot_frontier_cml(
         ax=ax2,
         frontier_df=frontier_esg,
@@ -997,21 +1248,8 @@ def render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg
         label="Mean-variance frontier (with ESG screen)",
         tangency_label="ESG highest Sharpe portfolio",
     )
-    ax2.scatter(
-        [esg_opt["Std Dev"] * 100],
-        [esg_opt["Expected Return"] * 100],
-        color=ESG_GREEN,
-        s=65,
-        zorder=5,
-    )
-    ax2.scatter(
-        [mvp_esg["Std Dev"] * 100],
-        [mvp_esg["RiskyReturn"] * 100] if "RiskyReturn" in mvp_esg.index else [mvp_esg["Risky Return"] * 100],
-        color=ESG_GREEN,
-        marker="s",
-        s=55,
-        zorder=5,
-    )
+    ax2.scatter([esg_opt["Std Dev"] * 100], [esg_opt["Expected Return"] * 100], color=ESG_GREEN, s=65, zorder=5)
+    ax2.scatter([mvp_esg["Std Dev"] * 100], [mvp_esg["Risky Return"] * 100], color=ESG_GREEN, marker="s", s=55, zorder=5)
     ax2.annotate(
         "objective-optimal portfolio",
         xy=(esg_opt["Std Dev"] * 100, esg_opt["Expected Return"] * 100),
@@ -1036,58 +1274,17 @@ def render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg
     style_axis(ax2)
     st.pyplot(fig2)
 
-    st.subheader("Minimum variance and highest Sharpe comparison")
     fig3, ax3 = plt.subplots(figsize=(10, 6))
-    ax3.plot(
-        frontier_all["Std Dev"] * 100,
-        frontier_all["Risky Return"] * 100,
-        color=THEORETICAL_BLUE,
-        linewidth=2.2,
-        label="Frontier without ESG screen",
-    )
-    ax3.plot(
-        frontier_esg["Std Dev"] * 100,
-        frontier_esg["Risky Return"] * 100,
-        color=ESG_GREEN,
-        linewidth=2.2,
-        label="Frontier with ESG screen",
-    )
+    ax3.plot(frontier_all["Std Dev"] * 100, frontier_all["Risky Return"] * 100, color=THEORETICAL_BLUE, linewidth=2.2)
+    ax3.plot(frontier_esg["Std Dev"] * 100, frontier_esg["Risky Return"] * 100, color=ESG_GREEN, linewidth=2.2)
     ax3.scatter([mvp_all["Std Dev"] * 100], [mvp_all["Risky Return"] * 100], color=THEORETICAL_BLUE, marker="s", s=60, zorder=5)
     ax3.scatter([tan_all["Std Dev"] * 100], [tan_all["Risky Return"] * 100], color=THEORETICAL_BLUE, marker="*", s=110, zorder=5)
     ax3.scatter([mvp_esg["Std Dev"] * 100], [mvp_esg["Risky Return"] * 100], color=ESG_GREEN, marker="s", s=60, zorder=5)
     ax3.scatter([tan_esg["Std Dev"] * 100], [tan_esg["Risky Return"] * 100], color=ESG_GREEN, marker="*", s=110, zorder=5)
-    ax3.annotate(
-        "MVP without ESG",
-        xy=(mvp_all["Std Dev"] * 100, mvp_all["Risky Return"] * 100),
-        xytext=(14, -18),
-        textcoords="offset points",
-        color=THEORETICAL_BLUE,
-        fontsize=9,
-    )
-    ax3.annotate(
-        "Highest Sharpe without ESG",
-        xy=(tan_all["Std Dev"] * 100, tan_all["Risky Return"] * 100),
-        xytext=(-120, 10),
-        textcoords="offset points",
-        color=THEORETICAL_BLUE,
-        fontsize=9,
-    )
-    ax3.annotate(
-        "MVP with ESG",
-        xy=(mvp_esg["Std Dev"] * 100, mvp_esg["Risky Return"] * 100),
-        xytext=(14, 8),
-        textcoords="offset points",
-        color=ESG_GREEN,
-        fontsize=9,
-    )
-    ax3.annotate(
-        "Highest Sharpe with ESG",
-        xy=(tan_esg["Std Dev"] * 100, tan_esg["Risky Return"] * 100),
-        xytext=(16, -16),
-        textcoords="offset points",
-        color=ESG_GREEN,
-        fontsize=9,
-    )
+    ax3.annotate("MVP without ESG", xy=(mvp_all["Std Dev"] * 100, mvp_all["Risky Return"] * 100), xytext=(14, -18), textcoords="offset points", color=THEORETICAL_BLUE, fontsize=9)
+    ax3.annotate("Highest Sharpe without ESG", xy=(tan_all["Std Dev"] * 100, tan_all["Risky Return"] * 100), xytext=(-120, 10), textcoords="offset points", color=THEORETICAL_BLUE, fontsize=9)
+    ax3.annotate("MVP with ESG", xy=(mvp_esg["Std Dev"] * 100, mvp_esg["Risky Return"] * 100), xytext=(14, 8), textcoords="offset points", color=ESG_GREEN, fontsize=9)
+    ax3.annotate("Highest Sharpe with ESG", xy=(tan_esg["Std Dev"] * 100, tan_esg["Risky Return"] * 100), xytext=(16, -16), textcoords="offset points", color=ESG_GREEN, fontsize=9)
     ax3.set_xlabel("Std")
     ax3.set_ylabel("Expected return")
     ax3.set_title("Minimum variance and highest Sharpe portfolios")
@@ -1095,17 +1292,15 @@ def render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg
     st.pyplot(fig3)
 
     st.dataframe(
-        pd.DataFrame(
-            [
-                {
-                    "ESG screen cutoff used in visual frontier": cutoff,
-                    "MVP without ESG": float(mvp_all["Risky Return"]),
-                    "Highest Sharpe without ESG": float(tan_all["Risky Return"]),
-                    "MVP with ESG": float(mvp_esg["Risky Return"]),
-                    "Highest Sharpe with ESG": float(tan_esg["Risky Return"]),
-                }
-            ]
-        ).style.format(
+        pd.DataFrame([
+            {
+                "ESG screen cutoff used in visual frontier": cutoff,
+                "MVP without ESG": float(mvp_all["Risky Return"]),
+                "Highest Sharpe without ESG": float(tan_all["Risky Return"]),
+                "MVP with ESG": float(mvp_esg["Risky Return"]),
+                "Highest Sharpe with ESG": float(tan_esg["Risky Return"]),
+            }
+        ]).style.format(
             {
                 "ESG screen cutoff used in visual frontier": "{:.2%}",
                 "MVP without ESG": "{:.2%}",
@@ -1116,7 +1311,6 @@ def render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg
         ),
         use_container_width=True,
     )
-
 
 
 def render_stock_tab(lambda_esg: float, gamma: float, rf: float):
