@@ -5,13 +5,13 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
-st.set_page_config(page_title="ESG Portfolio Optimiser", layout="wide")
+st.set_page_config(page_title="EcoVest", layout="wide")
 
 # =========================================================
 # Defaults
 # =========================================================
 DEFAULTS = {
-    "page": "inputs",
+    "page": "intro",
     "mu1_pct": 5.00,
     "mu2_pct": 12.00,
     "sigma1_pct": 9.00,
@@ -58,7 +58,7 @@ def reset_onboarding():
     st.session_state.risk_profile = None
     st.session_state.esg_profile = None
     st.session_state.beginner_mode = False
-    st.session_state.page = "inputs"
+    st.session_state.page = "intro"
     st.rerun()
 
 
@@ -122,12 +122,14 @@ def apply_first_time_choices(
     st.rerun()
 
 
-@st.dialog("Welcome to the ESG Portfolio Optimiser", width="medium", dismissible=False)
+@st.dialog("EcoVest Questionnaire", width="medium", dismissible=False)
 def onboarding_dialog():
     step = st.session_state.onboarding_step
 
     if step == "investor_type":
         st.write("**Are you an experienced investor or a first time user on the app?**")
+        st.caption("This helps EcoVest decide whether to use your own market assumptions or guide you through a simpler route.")
+
         investment_amount = st.number_input(
             "How much money are you looking to invest (£)?",
             min_value=0.0,
@@ -136,6 +138,8 @@ def onboarding_dialog():
             format="%.2f",
             key="dialog_investment_amount",
         )
+        st.caption("This amount does not change the optimal weights. It is used to convert the recommended weights into £ allocations.")
+
         investor_choice = st.radio(
             "Select one option",
             ["Experienced Investor", "New to Investing/First Time User"],
@@ -155,6 +159,8 @@ def onboarding_dialog():
 
     elif step == "experienced_path":
         st.write("**Which best describes what you want to do?**")
+        st.caption("Choose whether you already have your own 2-asset assumptions or whether you want the app to help you find a stock combination from the workbook data.")
+
         asset_choice = st.radio(
             "Select one option",
             EXPERIENCED_OPTIONS,
@@ -183,7 +189,9 @@ def onboarding_dialog():
                 st.rerun()
 
     elif step == "first_time_path":
-        st.write("**How risk averse are you?**")
+        st.write("**Choose your risk aversion level**")
+        st.caption("Risk aversion means how uncomfortable you are with investment ups and downs. A higher level means you prefer steadier outcomes and usually take less risk.")
+
         risk_choice = st.radio(
             "Risk profile",
             ["Aggressive", "Balanced", "Conservative", "Custom"],
@@ -200,9 +208,12 @@ def onboarding_dialog():
                 step=0.1,
                 key="dialog_custom_gamma",
             )
+            st.caption("Please enter a value between 0.5 and 10.0.")
 
         st.markdown("---")
-        st.write("**Please select a number that reflects your ESG preferences:**")
+        st.write("**Choose your ESG preference level**")
+        st.caption("This tells EcoVest how much you value holding greener assets. A higher value means the app will care more about ESG and less about pure risk-return efficiency.")
+
         esg_choice = st.radio(
             "ESG preference",
             ["Low ESG Impact", "Medium ESG Impact", "High ESG Impact", "Custom"],
@@ -219,6 +230,7 @@ def onboarding_dialog():
                 step=0.01,
                 key="dialog_custom_lambda",
             )
+            st.caption("Please enter a value between 0.0 and 1.0.")
 
         c1, c2 = st.columns(2)
         with c1:
@@ -629,18 +641,18 @@ def min_variance_from_frontier(frontier_df: pd.DataFrame) -> pd.Series:
     return frontier_df.loc[frontier_df["Std Dev"].idxmin()].copy()
 
 
-def plot_frontier_cml(ax, frontier_df: pd.DataFrame, rf: float, color: str, label: str, tangency_label: str):
+def plot_frontier_cml(ax, frontier_df: pd.DataFrame, rf: float, color: str, tangency_label: str):
     x = frontier_df["Std Dev"] * 100
     y = frontier_df["Risky Return"] * 100
     tan = tangency_from_frontier(frontier_df)
     rf_plot = rf * 100
 
-    ax.plot(x, y, color=color, linewidth=2.5, label=label)
+    ax.plot(x, y, color=color, linewidth=2.5)
     sigma_line = np.linspace(0.0, max(float(x.max()), float(tan["Std Dev"] * 100)) * 1.10, 200)
     cml = rf_plot + float(tan["Sharpe Ratio"]) * sigma_line
     ax.plot(sigma_line, cml, color=color, linewidth=1.8, linestyle=(0, (3, 3)))
     ax.scatter([0], [rf_plot], color=LIGHT_GREY, s=35, zorder=3)
-    ax.scatter([tan["Std Dev"] * 100], [tan["Risky Return"] * 100], color=color, s=55, zorder=4)
+    ax.scatter([tan["Std Dev"] * 100], [tan["Risky Return"] * 100], color=color, marker="*", s=110, zorder=4)
     ax.annotate(
         tangency_label,
         xy=(tan["Std Dev"] * 100, tan["Risky Return"] * 100),
@@ -651,6 +663,96 @@ def plot_frontier_cml(ax, frontier_df: pd.DataFrame, rf: float, color: str, labe
         arrowprops=dict(arrowstyle="->", color=color, lw=1.1),
     )
     return tan
+
+
+def invert_covariance(cov: np.ndarray) -> np.ndarray:
+    cov = np.asarray(cov, dtype=float)
+    cov = (cov + cov.T) / 2.0
+    cov = cov + np.eye(cov.shape[0]) * 1e-10
+    return np.linalg.pinv(cov)
+
+
+def frontier_constants(mu: np.ndarray, cov: np.ndarray):
+    inv_cov = invert_covariance(cov)
+    ones = np.ones(len(mu))
+    A = float(ones @ inv_cov @ ones)
+    B = float(ones @ inv_cov @ mu)
+    C = float(mu @ inv_cov @ mu)
+    D = max(A * C - B ** 2, 1e-12)
+    return inv_cov, ones, A, B, C, D
+
+
+def gmv_weights_frontier(mu: np.ndarray, cov: np.ndarray) -> np.ndarray:
+    inv_cov, ones, A, _, _, _ = frontier_constants(mu, cov)
+    return (inv_cov @ ones) / A
+
+
+def target_return_weights_frontier(mu: np.ndarray, cov: np.ndarray, target_return: float) -> np.ndarray:
+    inv_cov, ones, A, B, C, D = frontier_constants(mu, cov)
+    alpha = (C - B * target_return) / D
+    beta = (A * target_return - B) / D
+    return inv_cov @ (alpha * ones + beta * mu)
+
+
+def build_risky_frontier_visual(
+    mu: np.ndarray,
+    cov: np.ndarray,
+    esg_scores: np.ndarray,
+    rf: float,
+    frontier_points: int = 80,
+):
+    mu = np.asarray(mu, dtype=float)
+    cov = np.asarray(cov, dtype=float)
+    esg_scores = np.asarray(esg_scores, dtype=float)
+
+    w_gmv = gmv_weights_frontier(mu, cov)
+    gmv_return = float(w_gmv @ mu)
+    gmv_variance = float(w_gmv @ cov @ w_gmv)
+    gmv_std = float(np.sqrt(max(gmv_variance, 0.0)))
+    gmv_esg = float(w_gmv @ esg_scores)
+    gmv_sharpe = np.nan if gmv_std <= 1e-12 else (gmv_return - rf) / gmv_std
+
+    target_min = float(min(mu.min(), gmv_return))
+    target_max = float(max(mu.max(), gmv_return))
+    if np.isclose(target_min, target_max):
+        target_max = target_min + 1e-6
+
+    rows = []
+    for target in np.linspace(target_min, target_max, frontier_points):
+        w = target_return_weights_frontier(mu, cov, target)
+        exp_return = float(w @ mu)
+        variance = float(w @ cov @ w)
+        std_dev = float(np.sqrt(max(variance, 0.0)))
+        avg_esg = float(w @ esg_scores)
+        sharpe = np.nan if std_dev <= 1e-12 else (exp_return - rf) / std_dev
+        rows.append(
+            {
+                "Expected Return": exp_return,
+                "Risky Return": exp_return,
+                "Variance": variance,
+                "Std Dev": std_dev,
+                "Average ESG": avg_esg,
+                "Sharpe Ratio": sharpe,
+            }
+        )
+
+    frontier = pd.DataFrame(rows).sort_values("Std Dev").reset_index(drop=True)
+    frontier["Efficient"] = frontier["Expected Return"] >= gmv_return - 1e-12
+    gmv = {
+        "Expected Return": gmv_return,
+        "Risky Return": gmv_return,
+        "Variance": gmv_variance,
+        "Std Dev": gmv_std,
+        "Average ESG": gmv_esg,
+        "Sharpe Ratio": gmv_sharpe,
+        "Weights": w_gmv,
+    }
+    return frontier, gmv
+
+
+def min_esg_cutoff_from_scores(scores: np.ndarray, lambda_esg: float) -> float:
+    scores = np.asarray(scores, dtype=float)
+    return float(np.min(scores) + lambda_esg * (np.max(scores) - np.min(scores)))
 
 
 def audit_two_asset_solution(
@@ -760,96 +862,6 @@ def build_stock_objective_cloud(
         metrics = portfolio_metrics(x, mu, cov, rf, esg_scores, gamma, lambda_esg)
         rows.append(metrics)
     return pd.DataFrame(rows)
-
-
-def invert_covariance(cov: np.ndarray) -> np.ndarray:
-    cov = np.asarray(cov, dtype=float)
-    cov = (cov + cov.T) / 2.0
-    cov = cov + np.eye(cov.shape[0]) * 1e-10
-    return np.linalg.pinv(cov)
-
-
-def frontier_constants(mu: np.ndarray, cov: np.ndarray):
-    inv_cov = invert_covariance(cov)
-    ones = np.ones(len(mu))
-    A = float(ones @ inv_cov @ ones)
-    B = float(ones @ inv_cov @ mu)
-    C = float(mu @ inv_cov @ mu)
-    D = max(A * C - B**2, 1e-12)
-    return inv_cov, ones, A, B, C, D
-
-
-def gmv_weights_frontier(mu: np.ndarray, cov: np.ndarray) -> np.ndarray:
-    inv_cov, ones, A, _, _, _ = frontier_constants(mu, cov)
-    return (inv_cov @ ones) / A
-
-
-def target_return_weights_frontier(mu: np.ndarray, cov: np.ndarray, target_return: float) -> np.ndarray:
-    inv_cov, ones, A, B, C, D = frontier_constants(mu, cov)
-    alpha = (C - B * target_return) / D
-    beta = (A * target_return - B) / D
-    return inv_cov @ (alpha * ones + beta * mu)
-
-
-def build_risky_frontier_visual(
-    mu: np.ndarray,
-    cov: np.ndarray,
-    esg_scores: np.ndarray,
-    rf: float,
-    frontier_points: int = 80,
-):
-    mu = np.asarray(mu, dtype=float)
-    cov = np.asarray(cov, dtype=float)
-    esg_scores = np.asarray(esg_scores, dtype=float)
-
-    w_gmv = gmv_weights_frontier(mu, cov)
-    gmv_return = float(w_gmv @ mu)
-    gmv_variance = float(w_gmv @ cov @ w_gmv)
-    gmv_std = float(np.sqrt(max(gmv_variance, 0.0)))
-    gmv_esg = float(w_gmv @ esg_scores)
-    gmv_sharpe = np.nan if gmv_std <= 1e-12 else (gmv_return - rf) / gmv_std
-
-    target_min = float(min(mu.min(), gmv_return))
-    target_max = float(max(mu.max(), gmv_return))
-    if np.isclose(target_min, target_max):
-        target_max = target_min + 1e-6
-
-    rows = []
-    for target in np.linspace(target_min, target_max, frontier_points):
-        w = target_return_weights_frontier(mu, cov, target)
-        exp_return = float(w @ mu)
-        variance = float(w @ cov @ w)
-        std_dev = float(np.sqrt(max(variance, 0.0)))
-        avg_esg = float(w @ esg_scores)
-        sharpe = np.nan if std_dev <= 1e-12 else (exp_return - rf) / std_dev
-        rows.append(
-            {
-                "Expected Return": exp_return,
-                "Risky Return": exp_return,
-                "Variance": variance,
-                "Std Dev": std_dev,
-                "Average ESG": avg_esg,
-                "Sharpe Ratio": sharpe,
-            }
-        )
-
-    frontier = pd.DataFrame(rows).sort_values("Std Dev").reset_index(drop=True)
-    frontier["Efficient"] = frontier["Expected Return"] >= gmv_return - 1e-12
-    gmv = {
-        "Expected Return": gmv_return,
-        "Risky Return": gmv_return,
-        "Variance": gmv_variance,
-        "Std Dev": gmv_std,
-        "Average ESG": gmv_esg,
-        "Sharpe Ratio": gmv_sharpe,
-        "Weights": w_gmv,
-    }
-    return frontier, gmv
-
-
-def min_esg_cutoff_from_scores(scores: np.ndarray, lambda_esg: float) -> float:
-    scores = np.asarray(scores, dtype=float)
-    return float(np.min(scores) + lambda_esg * (np.max(scores) - np.min(scores)))
 
 
 # =========================================================
@@ -994,40 +1006,17 @@ def render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg
             mu_all = firms["Expected Return"].to_numpy(dtype=float)
             esg_all = firms["ESG Score"].to_numpy(dtype=float)
             cov_all = annual_cov.loc[firms["Ticker"], firms["Ticker"]].to_numpy(dtype=float)
+            asset_names_all = firms["Ticker"].tolist()
 
-            benchmark_opt, _ = solve_optimal_portfolio(
-                mu=mu_all,
-                cov=cov_all,
-                esg_scores=esg_all,
-                gamma=gamma,
-                lambda_esg=0.0,
-                rf=rf,
-                asset_names=firms["Ticker"].tolist(),
-            )
-            esg_opt, _ = solve_optimal_portfolio(
-                mu=mu_all,
-                cov=cov_all,
-                esg_scores=esg_all,
-                gamma=gamma,
-                lambda_esg=lambda_esg,
-                rf=rf,
-                asset_names=firms["Ticker"].tolist(),
-            )
-
-            frontier_all, gmv_all = build_risky_frontier_visual(
-                mu=mu_all,
-                cov=cov_all,
-                esg_scores=esg_all,
-                rf=rf,
-                frontier_points=max(60, min(200, mix_points // 10)),
-            )
+            frontier_points = max(60, min(200, mix_points // 10))
+            frontier_all, _ = build_risky_frontier_visual(mu_all, cov_all, esg_all, rf, frontier_points)
 
             cutoff = min_esg_cutoff_from_scores(esg_all, lambda_esg)
             firms_esg = firms[firms["ESG Score"] >= cutoff].copy().reset_index(drop=True)
 
             st.subheader("Frontier and CML visualisation")
             st.caption(
-                "For first-time users and investors asking for an asset combination, these graphs are built from all stocks in the workbook. The ESG frontier uses only the stocks that meet the minimum ESG cutoff."
+                "These graphs are built from all stocks in the workbook. The ESG frontier uses only stocks that meet the minimum ESG criterion implied by your ESG preference."
             )
             st.write(f"Stocks available in workbook: **{len(firms)}**")
             st.write(f"Stocks meeting ESG cutoff: **{len(firms_esg)}**")
@@ -1039,13 +1028,7 @@ def render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg
             mu_esg = firms_esg["Expected Return"].to_numpy(dtype=float)
             esg_esg = firms_esg["ESG Score"].to_numpy(dtype=float)
             cov_esg = annual_cov.loc[firms_esg["Ticker"], firms_esg["Ticker"]].to_numpy(dtype=float)
-            frontier_esg, gmv_esg = build_risky_frontier_visual(
-                mu=mu_esg,
-                cov=cov_esg,
-                esg_scores=esg_esg,
-                rf=rf,
-                frontier_points=max(60, min(200, mix_points // 10)),
-            )
+            frontier_esg, _ = build_risky_frontier_visual(mu_esg, cov_esg, esg_esg, rf, frontier_points)
 
             tan_all = tangency_from_frontier(frontier_all)
             mvp_all = min_variance_from_frontier(frontier_all)
@@ -1053,25 +1036,8 @@ def render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg
             mvp_esg = min_variance_from_frontier(frontier_esg)
 
             fig1, ax1 = plt.subplots(figsize=(10, 6))
-            plot_frontier_cml(
-                ax=ax1,
-                frontier_df=frontier_all,
-                rf=rf,
-                color=THEORETICAL_BLUE,
-                label="Mean-variance frontier (all stocks)",
-                tangency_label="highest Sharpe portfolio",
-            )
-            ax1.scatter([benchmark_opt["Std Dev"] * 100], [benchmark_opt["Expected Return"] * 100], color=THEORETICAL_BLUE, s=65, zorder=5)
+            plot_frontier_cml(ax1, frontier_all, rf, THEORETICAL_BLUE, "highest Sharpe portfolio")
             ax1.scatter([mvp_all["Std Dev"] * 100], [mvp_all["Risky Return"] * 100], color=THEORETICAL_BLUE, marker="s", s=55, zorder=5)
-            ax1.annotate(
-                "objective-optimal portfolio",
-                xy=(benchmark_opt["Std Dev"] * 100, benchmark_opt["Expected Return"] * 100),
-                xytext=(-90, 12),
-                textcoords="offset points",
-                color=THEORETICAL_BLUE,
-                fontsize=9,
-                arrowprops=dict(arrowstyle="->", color=THEORETICAL_BLUE, lw=1.2),
-            )
             ax1.annotate(
                 "minimum variance portfolio",
                 xy=(mvp_all["Std Dev"] * 100, mvp_all["Risky Return"] * 100),
@@ -1089,25 +1055,8 @@ def render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg
 
             fig2, ax2 = plt.subplots(figsize=(10, 6))
             ax2.plot(frontier_all["Std Dev"] * 100, frontier_all["Risky Return"] * 100, color=THEORETICAL_BLUE, linewidth=2.1, alpha=0.7)
-            plot_frontier_cml(
-                ax=ax2,
-                frontier_df=frontier_esg,
-                rf=rf,
-                color=ESG_GREEN,
-                label="ESG frontier",
-                tangency_label="ESG highest Sharpe portfolio",
-            )
-            ax2.scatter([esg_opt["Std Dev"] * 100], [esg_opt["Expected Return"] * 100], color=ESG_GREEN, s=65, zorder=5)
+            plot_frontier_cml(ax2, frontier_esg, rf, ESG_GREEN, "ESG highest Sharpe portfolio")
             ax2.scatter([mvp_esg["Std Dev"] * 100], [mvp_esg["Risky Return"] * 100], color=ESG_GREEN, marker="s", s=55, zorder=5)
-            ax2.annotate(
-                "objective-optimal portfolio",
-                xy=(esg_opt["Std Dev"] * 100, esg_opt["Expected Return"] * 100),
-                xytext=(18, -16),
-                textcoords="offset points",
-                color=ESG_GREEN,
-                fontsize=9,
-                arrowprops=dict(arrowstyle="->", color=ESG_GREEN, lw=1.2),
-            )
             ax2.annotate(
                 "ESG minimum variance portfolio",
                 xy=(mvp_esg["Std Dev"] * 100, mvp_esg["Risky Return"] * 100),
@@ -1140,26 +1089,14 @@ def render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg
             style_axis(ax3)
             st.pyplot(fig3)
 
-            st.dataframe(
-                pd.DataFrame([
-                    {
-                        "ESG cutoff used": cutoff,
-                        "MVP without ESG": float(mvp_all["Risky Return"]),
-                        "Highest Sharpe without ESG": float(tan_all["Risky Return"]),
-                        "MVP with ESG": float(mvp_esg["Risky Return"]),
-                        "Highest Sharpe with ESG": float(tan_esg["Risky Return"]),
-                    }
-                ]).style.format(
-                    {
-                        "ESG cutoff used": "{:.2%}",
-                        "MVP without ESG": "{:.2%}",
-                        "Highest Sharpe without ESG": "{:.2%}",
-                        "MVP with ESG": "{:.2%}",
-                        "Highest Sharpe with ESG": "{:.2%}",
-                    }
-                ),
-                use_container_width=True,
-            )
+            benchmark_opt, _ = solve_optimal_portfolio(mu_all, cov_all, esg_all, gamma, 0.0, rf, asset_names_all)
+            esg_opt, _ = solve_optimal_portfolio(mu_all, cov_all, esg_all, gamma, lambda_esg, rf, asset_names_all)
+            compare_df = pd.DataFrame([
+                {"Case": "Objective-optimal without ESG taste", **add_currency_columns(benchmark_opt, float(st.session_state.investment_amount))},
+                {"Case": "Objective-optimal with ESG taste", **add_currency_columns(esg_opt, float(st.session_state.investment_amount))},
+            ])
+            st.subheader("Optimal portfolio details for comparison")
+            st.dataframe(format_optimal_summary(compare_df), use_container_width=True)
             return
 
         except Exception as e:
@@ -1167,25 +1104,8 @@ def render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg
             return
 
     cov = var_covar(sigma, rho)
-
-    benchmark_opt, _ = solve_optimal_portfolio(
-        mu=mu,
-        cov=cov,
-        esg_scores=esg_scores,
-        gamma=gamma,
-        lambda_esg=0.0,
-        rf=rf,
-        asset_names=["Asset 1", "Asset 2"],
-    )
-    esg_opt, _ = solve_optimal_portfolio(
-        mu=mu,
-        cov=cov,
-        esg_scores=esg_scores,
-        gamma=gamma,
-        lambda_esg=lambda_esg,
-        rf=rf,
-        asset_names=["Asset 1", "Asset 2"],
-    )
+    benchmark_opt, _ = solve_optimal_portfolio(mu, cov, esg_scores, gamma, 0.0, rf, ["Asset 1", "Asset 2"])
+    esg_opt, _ = solve_optimal_portfolio(mu, cov, esg_scores, gamma, lambda_esg, rf, ["Asset 1", "Asset 2"])
 
     frontier_all = build_two_asset_risky_frontier(mu, sigma, rho, rf, esg_scores, mix_points)
     cutoff = esg_frontier_cutoff(frontier_all, lambda_esg)
@@ -1199,19 +1119,10 @@ def render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg
     mvp_esg = min_variance_from_frontier(frontier_esg)
 
     st.subheader("Frontier and CML visualisation")
-    st.caption(
-        "These graphs are visual aids. For experienced investors who already have their own inputs, they are built from the theoretical 2-asset model."
-    )
+    st.caption("These graphs are theoretical and use your 2-asset inputs directly.")
 
     fig1, ax1 = plt.subplots(figsize=(10, 6))
-    plot_frontier_cml(
-        ax=ax1,
-        frontier_df=frontier_all,
-        rf=rf,
-        color=THEORETICAL_BLUE,
-        label="Mean-variance frontier (without ESG screen)",
-        tangency_label="highest Sharpe portfolio",
-    )
+    plot_frontier_cml(ax1, frontier_all, rf, THEORETICAL_BLUE, "highest Sharpe portfolio")
     ax1.scatter([benchmark_opt["Std Dev"] * 100], [benchmark_opt["Expected Return"] * 100], color=THEORETICAL_BLUE, s=65, zorder=5)
     ax1.scatter([mvp_all["Std Dev"] * 100], [mvp_all["Risky Return"] * 100], color=THEORETICAL_BLUE, marker="s", s=55, zorder=5)
     ax1.annotate(
@@ -1240,14 +1151,7 @@ def render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg
 
     fig2, ax2 = plt.subplots(figsize=(10, 6))
     ax2.plot(frontier_all["Std Dev"] * 100, frontier_all["Risky Return"] * 100, color=THEORETICAL_BLUE, linewidth=2.1, alpha=0.7)
-    plot_frontier_cml(
-        ax=ax2,
-        frontier_df=frontier_esg,
-        rf=rf,
-        color=ESG_GREEN,
-        label="Mean-variance frontier (with ESG screen)",
-        tangency_label="ESG highest Sharpe portfolio",
-    )
+    plot_frontier_cml(ax2, frontier_esg, rf, ESG_GREEN, "ESG highest Sharpe portfolio")
     ax2.scatter([esg_opt["Std Dev"] * 100], [esg_opt["Expected Return"] * 100], color=ESG_GREEN, s=65, zorder=5)
     ax2.scatter([mvp_esg["Std Dev"] * 100], [mvp_esg["Risky Return"] * 100], color=ESG_GREEN, marker="s", s=55, zorder=5)
     ax2.annotate(
@@ -1291,26 +1195,6 @@ def render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg
     style_axis(ax3)
     st.pyplot(fig3)
 
-    st.dataframe(
-        pd.DataFrame([
-            {
-                "ESG screen cutoff used in visual frontier": cutoff,
-                "MVP without ESG": float(mvp_all["Risky Return"]),
-                "Highest Sharpe without ESG": float(tan_all["Risky Return"]),
-                "MVP with ESG": float(mvp_esg["Risky Return"]),
-                "Highest Sharpe with ESG": float(tan_esg["Risky Return"]),
-            }
-        ]).style.format(
-            {
-                "ESG screen cutoff used in visual frontier": "{:.2%}",
-                "MVP without ESG": "{:.2%}",
-                "Highest Sharpe without ESG": "{:.2%}",
-                "MVP with ESG": "{:.2%}",
-                "Highest Sharpe with ESG": "{:.2%}",
-            }
-        ),
-        use_container_width=True,
-    )
 
 
 def render_stock_tab(lambda_esg: float, gamma: float, rf: float):
@@ -1408,7 +1292,8 @@ def render_stock_tab(lambda_esg: float, gamma: float, rf: float):
             zorder=5,
         )
         ax.annotate(
-            "benchmark optimum\n(λ = 0)",
+            "benchmark optimum
+(λ = 0)",
             xy=(benchmark_opt["Std Dev"] * 100, benchmark_opt["Expected Return"] * 100),
             xytext=(-70, 12),
             textcoords="offset points",
@@ -1463,27 +1348,116 @@ def render_stock_tab(lambda_esg: float, gamma: float, rf: float):
 
 
 # =========================================================
-# Force questionnaire before app use
+# Force questionnaire only after landing page
 # =========================================================
-if not st.session_state.onboarding_complete:
+if st.session_state.page == "questionnaire" and not st.session_state.onboarding_complete:
     onboarding_dialog()
-    st.title("ESG Portfolio Optimiser")
-    st.info("Please complete the questionnaire to start using the app.")
+    st.title("EcoVest")
+    st.info("Please complete the questionnaire to continue.")
     st.stop()
+
+
+# =========================================================
+# Landing page
+# =========================================================
+if st.session_state.page == "intro":
+    st.title("EcoVest")
+    st.markdown(
+        """
+        **EcoVest** is a sustainable finance app designed to help investors compare traditional portfolio choices with ESG-aware alternatives.
+
+        The app can work in two ways. If you already have your own asset assumptions, it lets you test those inputs in a theoretical setting. If you are newer to investing, or you want help finding a stock combination, it can also use the workbook stock universe to compare a broad mean-variance frontier against an ESG-screened frontier.
+
+        The process is simple:
+        1. You answer a short questionnaire.
+        2. EcoVest identifies the route that best fits your needs.
+        3. You receive portfolio results, frontier visuals, and stock-based comparisons.
+
+        The results you are likely to observe are:
+        - how stronger ESG preferences can shrink the investable frontier,
+        - how the minimum-variance and highest-Sharpe portfolios change,
+        - and how the final recommended allocation translates into actual £ amounts.
+        """
+    )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Continue to questionnaire", use_container_width=True):
+            go_to("questionnaire")
+    with c2:
+        if st.button("Meet the team", use_container_width=True):
+            go_to("credits")
+
+
+# =========================================================
+# Credits page
+# =========================================================
+elif st.session_state.page == "credits":
+    st.title("EcoVest Contributions")
+    credits_df = pd.DataFrame(
+        [
+            {
+                "Student": "Javier Alramahi",
+                "Student ID": "230206379",
+                "Main Responsibilities": "Poster Design & Content Development",
+                "Secondary Support Tasks": "Concept Development & Innovation",
+            },
+            {
+                "Student": "Alexander Michael Elgen",
+                "Student ID": "230255447",
+                "Main Responsibilities": "Poster Design & Content Development",
+                "Secondary Support Tasks": "Concept Development & Innovation",
+            },
+            {
+                "Student": "Octavian Gopcalo",
+                "Student ID": "230319831",
+                "Main Responsibilities": "App Development & Implementation",
+                "Secondary Support Tasks": "Visual Enhancement & Poster Refinement",
+            },
+            {
+                "Student": "Om Naik",
+                "Student ID": "230255850",
+                "Main Responsibilities": "App Development & Implementation",
+                "Secondary Support Tasks": "Visual Enhancement & Poster Refinement",
+            },
+            {
+                "Student": "Kai Qin Ong",
+                "Student ID": "221120451",
+                "Main Responsibilities": "App Development & Implementation",
+                "Secondary Support Tasks": "Visual Enhancement & Poster Refinement",
+            },
+            {
+                "Student": "Ravi Sapan Nileshkumar Patel",
+                "Student ID": "231173454",
+                "Main Responsibilities": "Poster Design & Content Development",
+                "Secondary Support Tasks": "Concept Development & Innovation",
+            },
+        ]
+    )
+    st.dataframe(credits_df, use_container_width=True, hide_index=True)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Back to home", use_container_width=True):
+            go_to("intro")
+    with c2:
+        if st.button("Continue to questionnaire", use_container_width=True):
+            go_to("questionnaire")
 
 
 # =========================================================
 # Inputs page
 # =========================================================
-if st.session_state.page == "inputs":
+elif st.session_state.page == "inputs":
     if is_experienced_find_mode():
         st.title("Asset Finder Preferences")
         st.caption(
-            "Experienced Investor path: choose your risk profile and ESG preferences below. The app will only show the stock-universe optimisation tab."
+            "Experienced Investor path: choose your risk profile and ESG preferences below. The app will show stock-universe results built from the workbook data."
         )
 
         with st.form("stock_finder_form"):
-            st.subheader("Risk profile")
+            st.subheader("Choose your risk aversion level")
+            st.caption("Risk aversion measures how much you dislike uncertainty. A higher value means you prefer steadier outcomes and are likely to hold less risky exposure overall.")
             risk_choice = st.radio(
                 "How risk averse are you?",
                 ["Aggressive", "Balanced", "Conservative", "Custom"],
@@ -1505,9 +1479,11 @@ if st.session_state.page == "inputs":
                     step=0.1,
                     key="experienced_find_custom_gamma",
                 )
+                st.caption("Please enter a value between 0.5 and 10.0.")
 
             st.markdown("---")
-            st.subheader("ESG preferences")
+            st.subheader("Choose your ESG preference level")
+            st.caption("This controls how strongly EcoVest prioritises greener assets. Higher values give more importance to ESG and less to pure efficiency.")
             esg_choice = st.radio(
                 "Please select a number that reflects your ESG preferences:",
                 ["Low ESG Impact", "Medium ESG Impact", "High ESG Impact", "Custom"],
@@ -1529,6 +1505,7 @@ if st.session_state.page == "inputs":
                     step=0.01,
                     key="experienced_find_custom_lambda",
                 )
+                st.caption("Please enter a value between 0.0 and 1.0.")
 
             st.markdown("---")
             st.subheader("Optimisation settings")
@@ -1547,7 +1524,7 @@ if st.session_state.page == "inputs":
                 1,
             )
 
-            submitted = st.form_submit_button("Continue to stock optimisation")
+            submitted = st.form_submit_button("Continue to results")
 
         if submitted:
             gamma_value = float(custom_gamma) if risk_choice == "Custom" else RISK_MAP[risk_choice]
@@ -1566,7 +1543,7 @@ if st.session_state.page == "inputs":
 
         if is_experienced_existing_mode():
             st.caption(
-                "Experienced Investor path: enter your existing 2-asset combination below. The app will only show the theoretical optimisation tab."
+                "Experienced Investor path: enter your existing 2-asset assumptions below. The frontier visuals will remain theoretical."
             )
         else:
             st.caption("These are the current model assumptions. You can still edit them if you want.")
@@ -1657,20 +1634,22 @@ if st.session_state.page == "inputs":
             st.markdown("---")
 
             st.subheader("Investor preferences")
+            st.caption("Risk aversion measures how strongly you penalise volatility. Please enter a value between 0.1 and 10.0.")
+            gamma = st.number_input(
+                "Risk aversion γ",
+                min_value=0.1,
+                max_value=10.0,
+                value=float(min(max(st.session_state.gamma, 0.1), 10.0)),
+                step=0.10,
+                format="%.2f",
+            )
+            st.caption("ESG preference intensity shows how strongly you value greener assets. Please enter a value between 0.0 and 1.0.")
             lambda_esg = st.slider(
                 "ESG preference intensity λ",
                 0.0,
                 1.0,
                 float(st.session_state.lambda_esg),
                 0.01,
-            )
-            gamma = st.number_input(
-                "Risk aversion γ",
-                min_value=0.1,
-                max_value=50.0,
-                value=float(max(st.session_state.gamma, 0.1)),
-                step=0.10,
-                format="%.2f",
             )
 
             st.markdown("---")
@@ -1708,11 +1687,14 @@ if st.session_state.page == "inputs":
             st.session_state.trading_days = trading_days
             go_to("results")
 
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     with c1:
         if st.button("Go to results"):
             go_to("results")
     with c2:
+        if st.button("Back to home"):
+            go_to("intro")
+    with c3:
         if st.button("Start over"):
             reset_onboarding()
 
@@ -1721,7 +1703,7 @@ if st.session_state.page == "inputs":
 # Results page
 # =========================================================
 elif st.session_state.page == "results":
-    st.title("Results")
+    st.title("EcoVest Results")
     st.caption(f"Investment amount entered in questionnaire: {format_gbp(float(st.session_state.investment_amount))}")
 
     show_theoretical = is_experienced_existing_mode() or st.session_state.beginner_mode
@@ -1731,14 +1713,14 @@ elif st.session_state.page == "results":
         st.success(
             f"First-time user mode active. Risk aversion γ = {st.session_state.gamma:.2f} and ESG intensity λ = {st.session_state.lambda_esg:.2f}."
         )
-        st.caption("You are seeing both tabs: the theoretical optimisation and the stock-universe optimisation.")
+        st.caption("You are seeing both the theoretical optimisation view and the stock-universe view.")
     elif is_experienced_existing_mode():
         st.info(
-            "Experienced Investor path: only the theoretical optimisation tab is shown because you already have 2 assets."
+            "Experienced Investor path: the main optimisation uses your own 2-asset inputs and the frontier visuals remain theoretical."
         )
     elif is_experienced_find_mode():
         st.info(
-            "Experienced Investor path: only the stock-universe optimisation tab is shown because you asked the app to help find an asset combination."
+            "Experienced Investor path: the app is using the workbook stock universe to build your frontiers and portfolio suggestions."
         )
 
     mu = np.array([st.session_state.mu1_pct, st.session_state.mu2_pct]) / 100.0
@@ -1776,7 +1758,14 @@ elif st.session_state.page == "results":
         with tab_frontier:
             render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg, mix_points)
     elif show_stock:
-        tab2 = st.tabs(["Stock-universe optimisation"])[0]
+        tab_frontier, tab2 = st.tabs(
+            [
+                "Frontier + CML visualisation",
+                "Stock-universe optimisation",
+            ]
+        )
+        with tab_frontier:
+            render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg, mix_points)
         with tab2:
             render_stock_tab(lambda_esg=lambda_esg, gamma=gamma, rf=rf)
 
@@ -1785,8 +1774,8 @@ elif st.session_state.page == "results":
         if st.button("Edit inputs"):
             go_to("inputs")
     with col2:
+        if st.button("Back to home"):
+            go_to("intro")
+    with col3:
         if st.button("Refresh questionnaire"):
             reset_onboarding()
-    with col3:
-        if st.button("Stay on results"):
-            st.rerun()
