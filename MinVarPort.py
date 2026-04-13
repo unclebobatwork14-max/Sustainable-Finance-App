@@ -22,8 +22,8 @@ DEFAULTS = {
     "esg2": 80.0,
     "lambda_esg": 0.30,
     "gamma": 3.0,
-    "num_points": 1001,
-    "frontier_points": 80,
+    "mix_points": 1001,
+    "sample_points": 4000,
     "trading_days": 252,
     "onboarding_complete": False,
     "onboarding_step": "investor_type",
@@ -213,119 +213,7 @@ def onboarding_dialog():
 
 
 # =========================================================
-# Tab 1: original 2-asset teaching model
-# =========================================================
-def var_covar(sigmas: np.ndarray, rho: float) -> np.ndarray:
-    return np.array([
-        [sigmas[0] ** 2, rho * sigmas[0] * sigmas[1]],
-        [rho * sigmas[0] * sigmas[1], sigmas[1] ** 2],
-    ])
-
-
-def build_portfolio_grid(
-    mu: np.ndarray,
-    sigma: np.ndarray,
-    rho: float,
-    rf: float,
-    esg_scores: np.ndarray,
-    gamma: float,
-    lambda_esg: float,
-    num_points: int,
-) -> pd.DataFrame:
-    cov = var_covar(sigma, rho)
-    weights = np.linspace(0, 1, num_points)
-
-    rows = []
-    for w1 in weights:
-        w = np.array([w1, 1 - w1])
-        exp_return = float(np.dot(mu, w))
-        variance = float(np.dot(w, np.dot(cov, w)))
-        std_dev = float(np.sqrt(max(variance, 0.0)))
-        esg_score = float(np.dot(esg_scores, w))
-        sharpe = np.nan if std_dev <= 1e-12 else (exp_return - rf) / std_dev
-        utility = exp_return - 0.5 * gamma * variance + lambda_esg * esg_score
-
-        rows.append(
-            {
-                "Weight Asset 1": w1,
-                "Weight Asset 2": 1 - w1,
-                "Expected Return": exp_return,
-                "Variance": variance,
-                "Std Dev": std_dev,
-                "ESG Score": esg_score,
-                "Sharpe Ratio": sharpe,
-                "Utility": utility,
-            }
-        )
-
-    return pd.DataFrame(rows)
-
-
-def required_esg_threshold(df: pd.DataFrame, lambda_esg: float) -> float:
-    s_min = float(df["ESG Score"].min())
-    s_max = float(df["ESG Score"].max())
-    return s_min + lambda_esg * (s_max - s_min)
-
-
-# FIX: recompute Sharpe inside the selector using the same rf everywhere
-# so the unrestricted tangency is always compared consistently with the ESG subset.
-def select_key_portfolios(df: pd.DataFrame, rf: float):
-    work = df.copy()
-    work["Sharpe Ratio"] = np.where(
-        work["Std Dev"] > 1e-12,
-        (work["Expected Return"] - rf) / work["Std Dev"],
-        np.nan,
-    )
-
-    valid = work[np.isfinite(work["Sharpe Ratio"])].copy()
-    idx_mvp = work["Std Dev"].idxmin()
-    idx_tan = valid["Sharpe Ratio"].idxmax()
-    return work.loc[idx_mvp], work.loc[idx_tan]
-
-
-def summary_df(mvp: pd.Series, tangency: pd.Series, labels: tuple[str, str]) -> pd.DataFrame:
-    return pd.DataFrame(
-        [
-            {
-                "Portfolio": labels[0],
-                "Weight Asset 1": mvp["Weight Asset 1"],
-                "Weight Asset 2": mvp["Weight Asset 2"],
-                "Expected Return": mvp["Expected Return"],
-                "Std Dev": mvp["Std Dev"],
-                "ESG Score": mvp["ESG Score"],
-                "Sharpe Ratio": mvp["Sharpe Ratio"],
-                "Utility": mvp["Utility"],
-            },
-            {
-                "Portfolio": labels[1],
-                "Weight Asset 1": tangency["Weight Asset 1"],
-                "Weight Asset 2": tangency["Weight Asset 2"],
-                "Expected Return": tangency["Expected Return"],
-                "Std Dev": tangency["Std Dev"],
-                "ESG Score": tangency["ESG Score"],
-                "Sharpe Ratio": tangency["Sharpe Ratio"],
-                "Utility": tangency["Utility"],
-            },
-        ]
-    )
-
-
-def format_table(df: pd.DataFrame):
-    return df.style.format(
-        {
-            "Weight Asset 1": "{:.2%}",
-            "Weight Asset 2": "{:.2%}",
-            "Expected Return": "{:.2%}",
-            "Std Dev": "{:.2%}",
-            "ESG Score": "{:.2%}",
-            "Sharpe Ratio": "{:.3f}",
-            "Utility": "{:.4f}",
-        }
-    )
-
-
-# =========================================================
-# Tab 2: fast workbook loader
+# Data helpers
 # =========================================================
 @st.cache_data
 def load_fast_workbook() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -411,96 +299,6 @@ def load_fast_workbook() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     return firms, cov, corr
 
 
-# =========================================================
-# Markowitz helpers for tab 2
-# =========================================================
-def invert_covariance(cov: np.ndarray) -> np.ndarray:
-    cov = np.asarray(cov, dtype=float)
-    cov = (cov + cov.T) / 2.0
-    cov = cov + np.eye(cov.shape[0]) * 1e-10
-    return np.linalg.pinv(cov)
-
-
-def frontier_constants(mu: np.ndarray, cov: np.ndarray):
-    inv_cov = invert_covariance(cov)
-    ones = np.ones(len(mu))
-    A = float(ones @ inv_cov @ ones)
-    B = float(ones @ inv_cov @ mu)
-    C = float(mu @ inv_cov @ mu)
-    D = max(A * C - B**2, 1e-12)
-    return inv_cov, ones, A, B, C, D
-
-
-def gmv_weights(mu: np.ndarray, cov: np.ndarray) -> np.ndarray:
-    inv_cov, ones, A, _, _, _ = frontier_constants(mu, cov)
-    return (inv_cov @ ones) / A
-
-
-def target_return_weights(mu: np.ndarray, cov: np.ndarray, target_return: float) -> np.ndarray:
-    inv_cov, ones, A, B, C, D = frontier_constants(mu, cov)
-    alpha = (C - B * target_return) / D
-    beta = (A * target_return - B) / D
-    return inv_cov @ (alpha * ones + beta * mu)
-
-
-def portfolio_stats(weights: np.ndarray, mu: np.ndarray, cov: np.ndarray, esg: np.ndarray | None = None) -> dict:
-    weights = np.asarray(weights, dtype=float)
-    exp_return = float(weights @ mu)
-    variance = float(weights @ cov @ weights)
-    std_dev = float(np.sqrt(max(variance, 0.0)))
-    out = {
-        "Expected Return": exp_return,
-        "Variance": variance,
-        "Std Dev": std_dev,
-    }
-    if esg is not None:
-        out["ESG Score"] = float(weights @ esg)
-    return out
-
-
-def build_frontier(mu: np.ndarray, cov: np.ndarray, esg: np.ndarray, num_points: int = 80):
-    mu = np.asarray(mu, dtype=float)
-    cov = np.asarray(cov, dtype=float)
-    esg = np.asarray(esg, dtype=float)
-
-    w_gmv = gmv_weights(mu, cov)
-    gmv = portfolio_stats(w_gmv, mu, cov, esg)
-    gmv["Weights"] = w_gmv
-
-    target_min = float(min(mu.min(), gmv["Expected Return"]))
-    target_max = float(max(mu.max(), gmv["Expected Return"]))
-    if np.isclose(target_min, target_max):
-        target_max = target_min + 1e-6
-
-    rows = []
-    for target in np.linspace(target_min, target_max, num_points):
-        w = target_return_weights(mu, cov, target)
-        stats = portfolio_stats(w, mu, cov, esg)
-        rows.append(
-            {
-                "Expected Return": stats["Expected Return"],
-                "Std Dev": stats["Std Dev"],
-                "Variance": stats["Variance"],
-                "ESG Score": stats["ESG Score"],
-            }
-        )
-
-    frontier = pd.DataFrame(rows).sort_values("Std Dev").reset_index(drop=True)
-    frontier["Efficient"] = frontier["Expected Return"] >= gmv["Expected Return"] - 1e-12
-    return frontier, gmv
-
-
-def weights_table(weights: np.ndarray, firms: pd.DataFrame) -> pd.DataFrame:
-    out = firms[["Ticker", "Company", "ESG Rating", "ESG Score", "Expected Return"]].copy()
-    out["Weight"] = weights
-    out["Abs Weight"] = out["Weight"].abs()
-    return out.sort_values("Abs Weight", ascending=False).reset_index(drop=True)
-
-
-def default_esg_cutoff(asset1_esg_pct: float, asset2_esg_pct: float, portfolio_esg_cutoff: float) -> float:
-    return max(min(asset1_esg_pct, asset2_esg_pct) / 100.0, portfolio_esg_cutoff)
-
-
 def annualise_covariance(daily_cov: pd.DataFrame, trading_days: int) -> pd.DataFrame:
     return daily_cov * float(trading_days)
 
@@ -511,11 +309,10 @@ def annualise_covariance(daily_cov: pd.DataFrame, trading_days: int) -> pd.DataF
 THEORETICAL_BLUE = "#1f77b4"
 ESG_GREEN = "#2ca02c"
 LIGHT_GREY = "#bfbfbf"
+DARK_GREY = "#666666"
 
 
-def style_frontier_axis(ax, x_max: float, y_max: float):
-    ax.set_xlim(0, x_max)
-    ax.set_ylim(0, y_max)
+def style_axis(ax):
     ax.grid(False)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -523,166 +320,537 @@ def style_frontier_axis(ax, x_max: float, y_max: float):
     ax.spines["bottom"].set_color(LIGHT_GREY)
     ax.spines["left"].set_linewidth(1.0)
     ax.spines["bottom"].set_linewidth(1.0)
-    ax.tick_params(axis="both", colors="#666666", length=3, width=1)
+    ax.tick_params(axis="both", colors=DARK_GREY, length=3, width=1)
     ax.xaxis.set_major_formatter(PercentFormatter(xmax=100, decimals=0))
     ax.yaxis.set_major_formatter(PercentFormatter(xmax=100, decimals=0))
 
 
-def plot_two_asset_frontier(ax, x, y, color, label, rf_plot, tangency, mvp, tangent_label, mvp_label, frontier_label, cml_color):
-    # Sort by weight order already present in x/y so the full frontier keeps the Markowitz shape
-    ax.plot(x, y, color=color, linewidth=2.6, label=frontier_label)
-
-    x_max_line = max(float(np.max(x)), float(tangency["Std Dev"] * 100)) * 1.10
-    sigma_line = np.linspace(0, x_max_line, 200)
-    cml = rf_plot + float(tangency["Sharpe Ratio"]) * sigma_line
-    ax.plot(sigma_line, cml, linestyle=(0, (2, 2)), color=cml_color, linewidth=1.8)
-
-    ax.scatter([0], [rf_plot], color=LIGHT_GREY, s=40, zorder=3)
-    ax.scatter([mvp["Std Dev"] * 100], [mvp["Expected Return"] * 100], color=color, marker="o", s=55, zorder=4)
-    ax.scatter([tangency["Std Dev"] * 100], [tangency["Expected Return"] * 100], color=color, marker="o", s=65, zorder=5)
-
-    ax.annotate(
-        tangent_label,
-        xy=(tangency["Std Dev"] * 100, tangency["Expected Return"] * 100),
-        xytext=(-55, 10),
-        textcoords="offset points",
-        color=color,
-        fontsize=9,
-        arrowprops=dict(arrowstyle="->", color=color, lw=1.2),
+# =========================================================
+# Objective-function helpers
+# =========================================================
+def var_covar(sigmas: np.ndarray, rho: float) -> np.ndarray:
+    return np.array(
+        [
+            [sigmas[0] ** 2, rho * sigmas[0] * sigmas[1]],
+            [rho * sigmas[0] * sigmas[1], sigmas[1] ** 2],
+        ]
     )
-    ax.annotate(
-        mvp_label,
-        xy=(mvp["Std Dev"] * 100, mvp["Expected Return"] * 100),
-        xytext=(12, -14),
-        textcoords="offset points",
-        color=color,
-        fontsize=8,
+
+
+def objective_value(
+    x: np.ndarray,
+    mu: np.ndarray,
+    cov: np.ndarray,
+    gamma: float,
+    lambda_esg: float,
+    esg_scores: np.ndarray,
+) -> float:
+    risky_sum = float(np.sum(x))
+    if risky_sum <= 1e-12:
+        avg_esg = 0.0
+    else:
+        avg_esg = float(np.dot(x, esg_scores) / risky_sum)
+
+    return float(
+        np.dot(x, mu)
+        - 0.5 * gamma * np.dot(x, np.dot(cov, x))
+        + lambda_esg * avg_esg
+    )
+
+
+def portfolio_metrics(
+    x: np.ndarray,
+    mu: np.ndarray,
+    cov: np.ndarray,
+    rf: float,
+    esg_scores: np.ndarray,
+    gamma: float,
+    lambda_esg: float,
+) -> dict:
+    x = np.asarray(x, dtype=float)
+    risky_sum = float(np.sum(x))
+    rf_weight = 1.0 - risky_sum
+    risky_return = float(np.dot(x, mu))
+    variance = float(np.dot(x, np.dot(cov, x)))
+    std_dev = float(np.sqrt(max(variance, 0.0)))
+    expected_total_return = float(rf_weight * rf + risky_return)
+    sharpe = np.nan if std_dev <= 1e-12 else (expected_total_return - rf) / std_dev
+    avg_esg = 0.0 if risky_sum <= 1e-12 else float(np.dot(x, esg_scores) / risky_sum)
+    obj = objective_value(x, mu, cov, gamma, lambda_esg, esg_scores)
+
+    return {
+        "Expected Return": expected_total_return,
+        "Variance": variance,
+        "Std Dev": std_dev,
+        "Risky Weight Sum": risky_sum,
+        "Risk-free Weight": rf_weight,
+        "Average ESG": avg_esg,
+        "Objective": obj,
+        "Sharpe Ratio": sharpe,
+    }
+
+
+def project_to_simplex(v: np.ndarray) -> np.ndarray:
+    v = np.asarray(v, dtype=float)
+    if v.ndim != 1:
+        raise ValueError("Input must be a 1D array")
+
+    u = np.sort(v)[::-1]
+    cssv = np.cumsum(u)
+    rho = np.nonzero(u * np.arange(1, len(u) + 1) > (cssv - 1))[0][-1]
+    theta = (cssv[rho] - 1) / (rho + 1)
+    w = np.maximum(v - theta, 0)
+    return w
+
+
+def direction_objective(
+    p: np.ndarray,
+    mu: np.ndarray,
+    cov: np.ndarray,
+    esg_scores: np.ndarray,
+    gamma: float,
+    lambda_esg: float,
+) -> float:
+    p = np.asarray(p, dtype=float)
+    a = float(np.dot(p, mu))
+    b = float(np.dot(p, np.dot(cov, p)))
+    esg_term = float(np.dot(p, esg_scores))
+
+    if gamma <= 1e-12 or b <= 1e-12 or a <= 1e-12:
+        return 0.0
+
+    return float((a * a) / (2.0 * gamma * b) + lambda_esg * esg_term)
+
+
+def direction_gradient(
+    p: np.ndarray,
+    mu: np.ndarray,
+    cov: np.ndarray,
+    esg_scores: np.ndarray,
+    gamma: float,
+    lambda_esg: float,
+) -> np.ndarray:
+    p = np.asarray(p, dtype=float)
+    a = float(np.dot(p, mu))
+    b = float(np.dot(p, np.dot(cov, p)))
+
+    if gamma <= 1e-12 or b <= 1e-12 or a <= 1e-12:
+        return lambda_esg * esg_scores.copy()
+
+    sigma_p = np.dot(cov, p)
+    return (a / (gamma * b)) * mu - (a * a / (gamma * b * b)) * sigma_p + lambda_esg * esg_scores
+
+
+def solve_direction_simplex(
+    mu: np.ndarray,
+    cov: np.ndarray,
+    esg_scores: np.ndarray,
+    gamma: float,
+    lambda_esg: float,
+    n_random_starts: int = 20,
+    max_iter: int = 300,
+    step_size: float = 0.15,
+    seed: int = 42,
+) -> np.ndarray:
+    n_assets = len(mu)
+    rng = np.random.default_rng(seed)
+
+    starts = [np.ones(n_assets) / n_assets]
+    starts.append(project_to_simplex(mu - np.min(mu) + 1e-6))
+    starts.append(project_to_simplex(esg_scores - np.min(esg_scores) + 1e-6))
+    for i in range(n_assets):
+        e = np.zeros(n_assets)
+        e[i] = 1.0
+        starts.append(e)
+    for _ in range(n_random_starts):
+        starts.append(rng.dirichlet(np.ones(n_assets)))
+
+    best_p = starts[0].copy()
+    best_obj = direction_objective(best_p, mu, cov, esg_scores, gamma, lambda_esg)
+
+    for p0 in starts:
+        p = p0.copy()
+        current_obj = direction_objective(p, mu, cov, esg_scores, gamma, lambda_esg)
+
+        for _ in range(max_iter):
+            grad = direction_gradient(p, mu, cov, esg_scores, gamma, lambda_esg)
+            local_step = step_size
+            improved = False
+
+            for _ in range(20):
+                candidate = project_to_simplex(p + local_step * grad)
+                cand_obj = direction_objective(candidate, mu, cov, esg_scores, gamma, lambda_esg)
+                if cand_obj >= current_obj - 1e-12:
+                    p = candidate
+                    current_obj = cand_obj
+                    improved = True
+                    break
+                local_step *= 0.5
+
+            if not improved:
+                break
+
+        if current_obj > best_obj:
+            best_obj = current_obj
+            best_p = p.copy()
+
+    return best_p
+
+
+def optimal_scale_for_direction(p: np.ndarray, mu: np.ndarray, cov: np.ndarray, gamma: float) -> float:
+    a = float(np.dot(p, mu))
+    b = float(np.dot(p, np.dot(cov, p)))
+    if gamma <= 1e-12 or b <= 1e-12:
+        return 0.0
+    return max(0.0, a / (gamma * b))
+
+
+def solve_optimal_portfolio(
+    mu: np.ndarray,
+    cov: np.ndarray,
+    esg_scores: np.ndarray,
+    gamma: float,
+    lambda_esg: float,
+    rf: float,
+    asset_names: list[str],
+) -> tuple[pd.Series, pd.DataFrame]:
+    p_star = solve_direction_simplex(mu, cov, esg_scores, gamma, lambda_esg)
+    alpha_star = optimal_scale_for_direction(p_star, mu, cov, gamma)
+    x_star = alpha_star * p_star
+    metrics = portfolio_metrics(x_star, mu, cov, rf, esg_scores, gamma, lambda_esg)
+
+    optimal_row = {
+        **{f"Weight {asset_names[i]}": float(x_star[i]) for i in range(len(asset_names))},
+        **metrics,
+    }
+
+    weight_table = pd.DataFrame(
+        {
+            "Asset": asset_names,
+            "Risky Weight": x_star,
+            "Direction Share (within risky assets)": p_star,
+            "ESG Score": esg_scores,
+            "Expected Return": mu,
+        }
+    ).sort_values("Risky Weight", ascending=False).reset_index(drop=True)
+
+    return pd.Series(optimal_row), weight_table
+
+
+def build_two_asset_objective_curve(
+    mu: np.ndarray,
+    sigma: np.ndarray,
+    rho: float,
+    rf: float,
+    esg_scores: np.ndarray,
+    gamma: float,
+    lambda_esg: float,
+    mix_points: int,
+) -> pd.DataFrame:
+    cov = var_covar(sigma, rho)
+    rows = []
+
+    for p1 in np.linspace(0.0, 1.0, mix_points):
+        p = np.array([p1, 1.0 - p1], dtype=float)
+        alpha = optimal_scale_for_direction(p, mu, cov, gamma)
+        x = alpha * p
+        metrics = portfolio_metrics(x, mu, cov, rf, esg_scores, gamma, lambda_esg)
+        rows.append(
+            {
+                "Mix Asset 1": p1,
+                "Mix Asset 2": 1.0 - p1,
+                "x1": float(x[0]),
+                "x2": float(x[1]),
+                **metrics,
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def audit_two_asset_solution(
+    mu: np.ndarray,
+    sigma: np.ndarray,
+    rho: float,
+    rf: float,
+    esg_scores: np.ndarray,
+    gamma: float,
+    lambda_esg: float,
+) -> dict:
+    cov = var_covar(sigma, rho)
+
+    opt_lambda0, _ = solve_optimal_portfolio(
+        mu=mu,
+        cov=cov,
+        esg_scores=esg_scores,
+        gamma=gamma,
+        lambda_esg=0.0,
+        rf=rf,
+        asset_names=["Asset 1", "Asset 2"],
+    )
+    opt_lambda0_gamma2, _ = solve_optimal_portfolio(
+        mu=mu,
+        cov=cov,
+        esg_scores=esg_scores,
+        gamma=2.0 * gamma,
+        lambda_esg=0.0,
+        rf=rf,
+        asset_names=["Asset 1", "Asset 2"],
+    )
+    opt_with_lambda, _ = solve_optimal_portfolio(
+        mu=mu,
+        cov=cov,
+        esg_scores=esg_scores,
+        gamma=gamma,
+        lambda_esg=lambda_esg,
+        rf=rf,
+        asset_names=["Asset 1", "Asset 2"],
+    )
+
+    risky0 = float(opt_lambda0["Risky Weight Sum"])
+    risky2 = float(opt_lambda0_gamma2["Risky Weight Sum"])
+    ratio = np.nan if risky0 <= 1e-12 else risky2 / risky0
+
+    greener_idx = int(np.argmax(esg_scores))
+    greener_weight = float(opt_with_lambda[f"Weight Asset {greener_idx + 1}"])
+    browner_idx = 1 - greener_idx
+    browner_weight = float(opt_with_lambda[f"Weight Asset {browner_idx + 1}"])
+
+    corner_solution = browner_weight <= 1e-8
+
+    corner_x = np.zeros(2)
+    corner_x[greener_idx] = optimal_scale_for_direction(
+        np.eye(2)[greener_idx],
+        mu,
+        cov,
+        gamma,
+    )
+    corner_obj = objective_value(corner_x, mu, cov, gamma, lambda_esg, esg_scores)
+    interior_x = np.array([
+        float(opt_with_lambda["Weight Asset 1"]),
+        float(opt_with_lambda["Weight Asset 2"]),
+    ])
+    interior_obj = objective_value(interior_x, mu, cov, gamma, lambda_esg, esg_scores)
+
+    identical_mu = np.array([mu[0], mu[0]])
+    identical_esg = np.array([esg_scores[0], esg_scores[0]])
+    opt_symmetric, _ = solve_optimal_portfolio(
+        mu=identical_mu,
+        cov=cov,
+        esg_scores=identical_esg,
+        gamma=gamma,
+        lambda_esg=0.0,
+        rf=rf,
+        asset_names=["Asset 1", "Asset 2"],
+    )
+
+    return {
+        "Risky sum (lambda=0)": risky0,
+        "Risky sum after doubling gamma (lambda=0)": risky2,
+        "Gamma-doubling ratio": ratio,
+        "Weight in greener asset": greener_weight,
+        "Weight in browner asset": browner_weight,
+        "Corner solution detected": corner_solution,
+        "Corner objective": corner_obj,
+        "Interior objective": interior_obj,
+        "Symmetry check weight asset 1": float(opt_symmetric["Weight Asset 1"]),
+        "Symmetry check weight asset 2": float(opt_symmetric["Weight Asset 2"]),
+    }
+
+
+@st.cache_data
+def sample_simplex_cloud(n_assets: int, n_samples: int, seed: int = 123) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    cloud = rng.dirichlet(np.ones(n_assets), size=n_samples)
+    return cloud
+
+
+def build_stock_objective_cloud(
+    p_cloud: np.ndarray,
+    mu: np.ndarray,
+    cov: np.ndarray,
+    rf: float,
+    esg_scores: np.ndarray,
+    gamma: float,
+    lambda_esg: float,
+) -> pd.DataFrame:
+    rows = []
+    for p in p_cloud:
+        alpha = optimal_scale_for_direction(p, mu, cov, gamma)
+        x = alpha * p
+        metrics = portfolio_metrics(x, mu, cov, rf, esg_scores, gamma, lambda_esg)
+        rows.append(metrics)
+    return pd.DataFrame(rows)
+
+
+# =========================================================
+# Formatting helpers
+# =========================================================
+def format_optimal_summary(df: pd.DataFrame):
+    format_map = {
+        col: "{:.3f}" for col in df.columns if col.startswith("Weight ")
+    }
+    format_map.update(
+        {
+            "Expected Return": "{:.2%}",
+            "Variance": "{:.5f}",
+            "Std Dev": "{:.2%}",
+            "Risky Weight Sum": "{:.3f}",
+            "Risk-free Weight": "{:.3f}",
+            "Average ESG": "{:.2%}",
+            "Objective": "{:.4f}",
+            "Sharpe Ratio": "{:.3f}",
+        }
+    )
+    return df.style.format(format_map)
+
+
+def format_weight_table(df: pd.DataFrame):
+    return df.style.format(
+        {
+            "Risky Weight": "{:.3f}",
+            "Direction Share (within risky assets)": "{:.2%}",
+            "ESG Score": "{:.2%}",
+            "Expected Return": "{:.2%}",
+        }
     )
 
 
 # =========================================================
 # Rendering helpers
 # =========================================================
-def render_theoretical_tab(
-    df_all: pd.DataFrame,
-    df_esg: pd.DataFrame,
-    rf: float,
-    mvp_std: pd.Series,
-    tan_std: pd.Series,
-    mvp_esg: pd.Series,
-    tan_esg: pd.Series,
-    std_summary: pd.DataFrame,
-    esg_summary: pd.DataFrame,
-):
-    st.subheader("1) Standard mean-variance frontier and CML")
-    fig1, ax1 = plt.subplots(figsize=(10, 6))
-    x_all = df_all["Std Dev"] * 100
-    y_all = df_all["Expected Return"] * 100
-    rf_plot = rf * 100
+def render_theoretical_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg, mix_points):
+    cov = var_covar(sigma, rho)
 
-    plot_two_asset_frontier(
-        ax=ax1,
-        x=x_all,
-        y=y_all,
-        color=THEORETICAL_BLUE,
-        label="All portfolios",
-        rf_plot=rf_plot,
-        tangency=tan_std,
-        mvp=mvp_std,
-        tangent_label="tangency portfolio",
-        mvp_label="minimum variance portfolio",
-        frontier_label="mean-variance frontier",
-        cml_color=LIGHT_GREY,
+    benchmark_opt, benchmark_weights = solve_optimal_portfolio(
+        mu=mu,
+        cov=cov,
+        esg_scores=esg_scores,
+        gamma=gamma,
+        lambda_esg=0.0,
+        rf=rf,
+        asset_names=["Asset 1", "Asset 2"],
     )
-    ax1.set_xlabel("Std")
-    ax1.set_ylabel("Expected return")
-    ax1.set_title("Standard frontier: all portfolios")
-    style_frontier_axis(ax1, x_max=max(float(x_all.max()) * 1.15, 50), y_max=max(float(y_all.max()) * 1.10, 10))
-    st.pyplot(fig1)
-    st.subheader("Summary table: Standard graph")
-    st.dataframe(format_table(std_summary), use_container_width=True)
+    esg_opt, esg_weights = solve_optimal_portfolio(
+        mu=mu,
+        cov=cov,
+        esg_scores=esg_scores,
+        gamma=gamma,
+        lambda_esg=lambda_esg,
+        rf=rf,
+        asset_names=["Asset 1", "Asset 2"],
+    )
 
-    st.subheader("2) ESG-screened frontier and CML")
-    fig2, ax2 = plt.subplots(figsize=(10, 6))
-    x_all_overlay = df_all["Std Dev"] * 100
-    y_all_overlay = df_all["Expected Return"] * 100
-    x_esg = df_esg["Std Dev"] * 100
-    y_esg = df_esg["Expected Return"] * 100
+    curve_benchmark = build_two_asset_objective_curve(mu, sigma, rho, rf, esg_scores, gamma, 0.0, mix_points)
+    curve_esg = build_two_asset_objective_curve(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg, mix_points)
+    audit = audit_two_asset_solution(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg)
 
-    ax2.plot(x_all_overlay, y_all_overlay, color=THEORETICAL_BLUE, linewidth=2.2)
-    ax2.plot(x_esg, y_esg, color=ESG_GREEN, linewidth=2.6)
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Risk aversion γ", f"{gamma:.2f}")
+    m2.metric("ESG taste λ", f"{lambda_esg:.2f}")
+    m3.metric("Benchmark risky sum", f"{benchmark_opt['Risky Weight Sum']:.3f}")
+    m4.metric("ESG-optimal risky sum", f"{esg_opt['Risky Weight Sum']:.3f}")
 
-    # All-assets tangency line for comparison
-    sigma_line_all = np.linspace(0, max(float(x_all_overlay.max()), float(tan_std["Std Dev"] * 100)) * 1.10, 200)
-    cml_all = rf_plot + float(tan_std["Sharpe Ratio"]) * sigma_line_all
-    ax2.plot(sigma_line_all, cml_all, linestyle=(0, (2, 2)), color=THEORETICAL_BLUE, linewidth=1.7, alpha=0.8)
+    st.subheader("Objective-optimal portfolio: λ = 0 benchmark")
+    st.dataframe(format_optimal_summary(pd.DataFrame([benchmark_opt])), use_container_width=True)
 
-    # ESG tangency line
-    sigma_line_esg = np.linspace(0, max(float(x_esg.max()), float(tan_esg["Std Dev"] * 100)) * 1.10, 200)
-    cml_esg = rf_plot + float(tan_esg["Sharpe Ratio"]) * sigma_line_esg
-    ax2.plot(sigma_line_esg, cml_esg, linestyle=(0, (4, 3)), color=ESG_GREEN, linewidth=1.9, alpha=0.9)
+    st.subheader("Objective-optimal portfolio: chosen ESG taste")
+    st.dataframe(format_optimal_summary(pd.DataFrame([esg_opt])), use_container_width=True)
 
-    ax2.scatter([0], [rf_plot], color=LIGHT_GREY, s=40, zorder=3)
-    ax2.scatter([tan_std["Std Dev"] * 100], [tan_std["Expected Return"] * 100], color=THEORETICAL_BLUE, s=60, zorder=5)
-    ax2.scatter([tan_esg["Std Dev"] * 100], [tan_esg["Expected Return"] * 100], color=ESG_GREEN, s=60, zorder=5)
-    ax2.scatter([mvp_std["Std Dev"] * 100], [mvp_std["Expected Return"] * 100], color=THEORETICAL_BLUE, s=45, zorder=4)
-    ax2.scatter([mvp_esg["Std Dev"] * 100], [mvp_esg["Expected Return"] * 100], color=ESG_GREEN, s=45, zorder=4)
+    st.subheader("Audit checks")
+    st.dataframe(
+        pd.DataFrame([audit]).style.format(
+            {
+                "Risky sum (lambda=0)": "{:.3f}",
+                "Risky sum after doubling gamma (lambda=0)": "{:.3f}",
+                "Gamma-doubling ratio": "{:.3f}",
+                "Weight in greener asset": "{:.3f}",
+                "Weight in browner asset": "{:.3f}",
+                "Corner objective": "{:.4f}",
+                "Interior objective": "{:.4f}",
+                "Symmetry check weight asset 1": "{:.3f}",
+                "Symmetry check weight asset 2": "{:.3f}",
+            }
+        ),
+        use_container_width=True,
+    )
 
-    ax2.annotate(
-        "tangency portfolio\n(all assets)",
-        xy=(tan_std["Std Dev"] * 100, tan_std["Expected Return"] * 100),
-        xytext=(-80, 10),
+    if bool(audit["Corner solution detected"]):
+        st.warning(
+            "Corner solution detected. This is economically meaningful: at this ESG preference level, holding the brown asset is not optimal."
+        )
+
+    st.subheader("Two-asset objective portfolios")
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(
+        curve_benchmark["Std Dev"] * 100,
+        curve_benchmark["Expected Return"] * 100,
+        color=THEORETICAL_BLUE,
+        linewidth=2.4,
+        label="Benchmark opportunity curve (λ = 0)",
+    )
+    ax.plot(
+        curve_esg["Std Dev"] * 100,
+        curve_esg["Expected Return"] * 100,
+        color=ESG_GREEN,
+        linewidth=2.4,
+        label="Opportunity curve (chosen λ)",
+        alpha=0.85,
+    )
+    ax.scatter(
+        [benchmark_opt["Std Dev"] * 100],
+        [benchmark_opt["Expected Return"] * 100],
+        color=THEORETICAL_BLUE,
+        s=60,
+        zorder=5,
+    )
+    ax.scatter(
+        [esg_opt["Std Dev"] * 100],
+        [esg_opt["Expected Return"] * 100],
+        color=ESG_GREEN,
+        s=60,
+        zorder=5,
+    )
+    ax.annotate(
+        "benchmark optimum\n(λ = 0)",
+        xy=(benchmark_opt["Std Dev"] * 100, benchmark_opt["Expected Return"] * 100),
+        xytext=(-70, 12),
         textcoords="offset points",
         color=THEORETICAL_BLUE,
         fontsize=9,
         arrowprops=dict(arrowstyle="->", color=THEORETICAL_BLUE, lw=1.2),
     )
-    ax2.annotate(
-        "tangency portfolio\n(portfolios with given ESG)",
-        xy=(tan_esg["Std Dev"] * 100, tan_esg["Expected Return"] * 100),
-        xytext=(24, -18),
+    ax.annotate(
+        "ESG-taste optimum",
+        xy=(esg_opt["Std Dev"] * 100, esg_opt["Expected Return"] * 100),
+        xytext=(16, -16),
         textcoords="offset points",
         color=ESG_GREEN,
         fontsize=9,
         arrowprops=dict(arrowstyle="->", color=ESG_GREEN, lw=1.2),
     )
-    ax2.annotate(
-        "mean-variance frontier\n(all assets)",
-        xy=(x_all_overlay.iloc[min(len(x_all_overlay) - 1, len(x_all_overlay) // 4)], y_all_overlay.iloc[min(len(y_all_overlay) - 1, len(y_all_overlay) // 4)]),
-        xytext=(28, -30),
-        textcoords="offset points",
-        color=THEORETICAL_BLUE,
-        fontsize=9,
-    )
-    ax2.annotate(
-        "mean-variance frontier\n(portfolios with given ESG)",
-        xy=(x_esg.iloc[min(len(x_esg) - 1, max(1, len(x_esg) // 2))], y_esg.iloc[min(len(y_esg) - 1, max(1, len(y_esg) // 2))]),
-        xytext=(20, 10),
-        textcoords="offset points",
-        color=ESG_GREEN,
-        fontsize=9,
-    )
+    ax.set_xlabel("Std")
+    ax.set_ylabel("Expected return")
+    style_axis(ax)
+    st.pyplot(fig)
 
-    ax2.set_xlabel("Std")
-    ax2.set_ylabel("Expected return")
-    ax2.set_title("ESG-screened frontier")
-    style_frontier_axis(ax2, x_max=max(float(x_all_overlay.max()) * 1.15, 50), y_max=max(float(max(y_all_overlay.max(), y_esg.max())) * 1.10, 10))
-    st.pyplot(fig2)
-    st.subheader("Summary table: ESG graph")
-    st.dataframe(format_table(esg_summary), use_container_width=True)
+    st.subheader("Risky-asset weights: λ = 0 benchmark")
+    st.dataframe(format_weight_table(benchmark_weights), use_container_width=True)
+
+    st.subheader("Risky-asset weights: chosen ESG taste")
+    st.dataframe(format_weight_table(esg_weights), use_container_width=True)
 
 
-def render_stock_tab(esg_cutoff: float | None):
-    st.subheader("3) Stock-universe frontiers and minimum-variance portfolios")
+
+def render_stock_tab(lambda_esg: float, gamma: float, rf: float):
+    st.subheader("Stock-universe objective optimisation")
     st.markdown(
         """
-        This tab uses the uploaded matched workbook only.
+        This tab maximises the same objective function over the stock universe:
 
-        The graph shows:
-        - the **theoretical frontier** from all matched stocks
-        - the **ESG-screened frontier** from the reduced stock set
+        max  x'μ  −  (γ/2) x'Σx  +  λ · s̄
 
-        Because the ESG case has fewer investable stocks, its feasible set should be weakly inside the full-stock frontier.
+        where the risky weights do not need to sum to one, and the remainder is implicitly held in the risk-free asset.
         """
     )
 
@@ -690,203 +858,123 @@ def render_stock_tab(esg_cutoff: float | None):
         firms, daily_cov, corr = load_fast_workbook()
         annual_cov = annualise_covariance(daily_cov, st.session_state.trading_days)
 
-        if st.session_state.beginner_mode or is_experienced_find_mode() or esg_cutoff is None:
-            default_cutoff = st.session_state.lambda_esg
-        else:
-            default_cutoff = default_esg_cutoff(
-                asset1_esg_pct=st.session_state.esg1,
-                asset2_esg_pct=st.session_state.esg2,
-                portfolio_esg_cutoff=esg_cutoff,
-            )
+        mu = firms["Expected Return"].to_numpy(dtype=float)
+        esg_scores = firms["ESG Score"].to_numpy(dtype=float)
+        cov = annual_cov.loc[firms["Ticker"], firms["Ticker"]].to_numpy(dtype=float)
+        names = firms["Ticker"].tolist()
 
-        st.write(f"Matched stocks available: **{len(firms)}**")
-
-        min_company_esg_pct = st.number_input(
-            "Minimum company ESG score for the screened frontier (%)",
-            min_value=0.0,
-            max_value=100.0,
-            value=float(default_cutoff * 100),
-            step=1.0,
-            format="%.1f",
-            key="stock_universe_esg_cutoff",
+        benchmark_opt, benchmark_weights = solve_optimal_portfolio(
+            mu=mu,
+            cov=cov,
+            esg_scores=esg_scores,
+            gamma=gamma,
+            lambda_esg=0.0,
+            rf=rf,
+            asset_names=names,
+        )
+        esg_opt, esg_weights = solve_optimal_portfolio(
+            mu=mu,
+            cov=cov,
+            esg_scores=esg_scores,
+            gamma=gamma,
+            lambda_esg=lambda_esg,
+            rf=rf,
+            asset_names=names,
         )
 
-        firms_all = firms.copy()
-        mu_all = firms_all["Expected Return"].to_numpy(dtype=float)
-        esg_all = firms_all["ESG Score"].to_numpy(dtype=float)
-        cov_all = annual_cov.loc[firms_all["Ticker"], firms_all["Ticker"]].to_numpy(dtype=float)
-        frontier_all, gmv_all = build_frontier(
-            mu_all, cov_all, esg_all, num_points=st.session_state.frontier_points
+        p_cloud = sample_simplex_cloud(len(names), st.session_state.sample_points)
+        cloud_benchmark = build_stock_objective_cloud(p_cloud, mu, cov, rf, esg_scores, gamma, 0.0)
+        cloud_esg = build_stock_objective_cloud(p_cloud, mu, cov, rf, esg_scores, gamma, lambda_esg)
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Stocks in universe", f"{len(firms)}")
+        m2.metric("Risk aversion γ", f"{gamma:.2f}")
+        m3.metric("Benchmark risky sum", f"{benchmark_opt['Risky Weight Sum']:.3f}")
+        m4.metric("ESG-optimal risky sum", f"{esg_opt['Risky Weight Sum']:.3f}")
+
+        st.subheader("Objective-optimal stock portfolio: λ = 0 benchmark")
+        st.dataframe(format_optimal_summary(pd.DataFrame([benchmark_opt])), use_container_width=True)
+
+        st.subheader("Objective-optimal stock portfolio: chosen ESG taste")
+        st.dataframe(format_optimal_summary(pd.DataFrame([esg_opt])), use_container_width=True)
+
+        st.subheader("Stock-universe objective plot")
+        fig, ax = plt.subplots(figsize=(11, 6))
+        ax.scatter(
+            cloud_benchmark["Std Dev"] * 100,
+            cloud_benchmark["Expected Return"] * 100,
+            color=THEORETICAL_BLUE,
+            alpha=0.08,
+            s=12,
         )
+        ax.scatter(
+            cloud_esg["Std Dev"] * 100,
+            cloud_esg["Expected Return"] * 100,
+            color=ESG_GREEN,
+            alpha=0.08,
+            s=12,
+        )
+        ax.scatter(
+            [benchmark_opt["Std Dev"] * 100],
+            [benchmark_opt["Expected Return"] * 100],
+            color=THEORETICAL_BLUE,
+            s=70,
+            zorder=5,
+        )
+        ax.scatter(
+            [esg_opt["Std Dev"] * 100],
+            [esg_opt["Expected Return"] * 100],
+            color=ESG_GREEN,
+            s=70,
+            zorder=5,
+        )
+        ax.annotate(
+            "benchmark optimum\n(λ = 0)",
+            xy=(benchmark_opt["Std Dev"] * 100, benchmark_opt["Expected Return"] * 100),
+            xytext=(-70, 12),
+            textcoords="offset points",
+            color=THEORETICAL_BLUE,
+            fontsize=9,
+            arrowprops=dict(arrowstyle="->", color=THEORETICAL_BLUE, lw=1.2),
+        )
+        ax.annotate(
+            "ESG-taste optimum",
+            xy=(esg_opt["Std Dev"] * 100, esg_opt["Expected Return"] * 100),
+            xytext=(16, -16),
+            textcoords="offset points",
+            color=ESG_GREEN,
+            fontsize=9,
+            arrowprops=dict(arrowstyle="->", color=ESG_GREEN, lw=1.2),
+        )
+        ax.set_xlabel("Std")
+        ax.set_ylabel("Expected return")
+        style_axis(ax)
+        st.pyplot(fig)
 
-        cutoff = min_company_esg_pct / 100.0
-        firms_screened = firms_all[firms_all["ESG Score"] >= cutoff].copy().reset_index(drop=True)
-        st.write(f"Stocks meeting ESG cutoff: **{len(firms_screened)}**")
+        st.subheader("Top stock weights: λ = 0 benchmark")
+        st.dataframe(format_weight_table(benchmark_weights.head(15)), use_container_width=True)
 
-        if len(firms_screened) < 2:
-            st.warning("Fewer than 2 stocks meet the ESG cutoff. Lower the minimum company ESG score.")
-        else:
-            mu_scr = firms_screened["Expected Return"].to_numpy(dtype=float)
-            esg_scr = firms_screened["ESG Score"].to_numpy(dtype=float)
-            cov_scr = annual_cov.loc[firms_screened["Ticker"], firms_screened["Ticker"]].to_numpy(dtype=float)
-            frontier_scr, gmv_scr = build_frontier(
-                mu_scr, cov_scr, esg_scr, num_points=st.session_state.frontier_points
-            )
+        st.subheader("Top stock weights: chosen ESG taste")
+        st.dataframe(format_weight_table(esg_weights.head(15)), use_container_width=True)
 
-            st.subheader("Stock-universe frontier graph")
-            fig3, ax3 = plt.subplots(figsize=(11, 6))
-
-            all_eff = frontier_all[frontier_all["Efficient"]].copy()
-            scr_eff = frontier_scr[frontier_scr["Efficient"]].copy()
-
-            ax3.plot(
-                all_eff["Std Dev"] * 100,
-                all_eff["Expected Return"] * 100,
-                color=THEORETICAL_BLUE,
-                linewidth=2.4,
-                label="Theoretical frontier: all matched stocks",
+        c1, c2 = st.columns(2)
+        with c1:
+            st.download_button(
+                "Download benchmark stock weights",
+                benchmark_weights.to_csv(index=False).encode("utf-8"),
+                "benchmark_stock_weights.csv",
+                "text/csv",
             )
-            ax3.plot(
-                scr_eff["Std Dev"] * 100,
-                scr_eff["Expected Return"] * 100,
-                color=ESG_GREEN,
-                linewidth=2.6,
-                label="ESG-screened frontier",
+        with c2:
+            st.download_button(
+                "Download ESG stock weights",
+                esg_weights.to_csv(index=False).encode("utf-8"),
+                "esg_stock_weights.csv",
+                "text/csv",
             )
-            ax3.scatter(
-                [gmv_all["Std Dev"] * 100],
-                [gmv_all["Expected Return"] * 100],
-                color=THEORETICAL_BLUE,
-                marker="o",
-                s=55,
-                zorder=4,
-            )
-            ax3.scatter(
-                [gmv_scr["Std Dev"] * 100],
-                [gmv_scr["Expected Return"] * 100],
-                color=ESG_GREEN,
-                marker="o",
-                s=55,
-                zorder=4,
-            )
-            ax3.annotate(
-                "minimum variance\n(all stocks)",
-                xy=(gmv_all["Std Dev"] * 100, gmv_all["Expected Return"] * 100),
-                xytext=(-70, 12),
-                textcoords="offset points",
-                color=THEORETICAL_BLUE,
-                fontsize=9,
-                arrowprops=dict(arrowstyle="->", color=THEORETICAL_BLUE, lw=1.2),
-            )
-            ax3.annotate(
-                "minimum variance\n(ESG-screened)",
-                xy=(gmv_scr["Std Dev"] * 100, gmv_scr["Expected Return"] * 100),
-                xytext=(16, -18),
-                textcoords="offset points",
-                color=ESG_GREEN,
-                fontsize=9,
-                arrowprops=dict(arrowstyle="->", color=ESG_GREEN, lw=1.2),
-            )
-            ax3.set_xlabel("Std")
-            ax3.set_ylabel("Expected return")
-            ax3.set_title("All-stock theoretical frontier vs ESG-screened frontier")
-            style_frontier_axis(
-                ax3,
-                x_max=max(float(all_eff["Std Dev"].max()) * 100 * 1.15, float(scr_eff["Std Dev"].max()) * 100 * 1.15, 50),
-                y_max=max(float(all_eff["Expected Return"].max()) * 100 * 1.10, float(scr_eff["Expected Return"].max()) * 100 * 1.10, 10),
-            )
-            st.pyplot(fig3)
-
-            st.subheader("Minimum-variance portfolio summary")
-            summary = pd.DataFrame(
-                [
-                    {
-                        "Case": "Without ESG preference",
-                        "Stocks": len(firms_all),
-                        "Expected Return": gmv_all["Expected Return"],
-                        "Std Dev": gmv_all["Std Dev"],
-                        "ESG Score": gmv_all["ESG Score"],
-                    },
-                    {
-                        "Case": "With ESG preference",
-                        "Stocks": len(firms_screened),
-                        "Expected Return": gmv_scr["Expected Return"],
-                        "Std Dev": gmv_scr["Std Dev"],
-                        "ESG Score": gmv_scr["ESG Score"],
-                    },
-                ]
-            )
-            st.dataframe(
-                summary.style.format(
-                    {
-                        "Expected Return": "{:.2%}",
-                        "Std Dev": "{:.2%}",
-                        "ESG Score": "{:.2%}",
-                    }
-                ),
-                use_container_width=True,
-            )
-
-            st.subheader("Top weights in minimum-variance portfolio: without ESG preference")
-            weights_all = weights_table(gmv_all["Weights"], firms_all)
-            st.dataframe(
-                weights_all.head(10).style.format(
-                    {
-                        "ESG Score": "{:.2%}",
-                        "Expected Return": "{:.2%}",
-                        "Weight": "{:.2%}",
-                        "Abs Weight": "{:.2%}",
-                    }
-                ),
-                use_container_width=True,
-            )
-
-            st.subheader("Top weights in minimum-variance portfolio: with ESG preference")
-            weights_scr = weights_table(gmv_scr["Weights"], firms_screened)
-            st.dataframe(
-                weights_scr.head(10).style.format(
-                    {
-                        "ESG Score": "{:.2%}",
-                        "Expected Return": "{:.2%}",
-                        "Weight": "{:.2%}",
-                        "Abs Weight": "{:.2%}",
-                    }
-                ),
-                use_container_width=True,
-            )
-
-            c1, c2, c3, c4 = st.columns(4)
-            with c1:
-                st.download_button(
-                    "Download all-stock MVP weights",
-                    weights_all.to_csv(index=False).encode("utf-8"),
-                    "all_stock_mvp_weights.csv",
-                    "text/csv",
-                )
-            with c2:
-                st.download_button(
-                    "Download ESG MVP weights",
-                    weights_scr.to_csv(index=False).encode("utf-8"),
-                    "esg_stock_mvp_weights.csv",
-                    "text/csv",
-                )
-            with c3:
-                st.download_button(
-                    "Download all-stock frontier",
-                    frontier_all.to_csv(index=False).encode("utf-8"),
-                    "all_stock_frontier.csv",
-                    "text/csv",
-                )
-            with c4:
-                st.download_button(
-                    "Download ESG frontier",
-                    frontier_scr.to_csv(index=False).encode("utf-8"),
-                    "esg_stock_frontier.csv",
-                    "text/csv",
-                )
 
     except Exception as e:
-        st.error(f"Could not build the stock-universe frontier from the workbook: {e}")
+        st.error(f"Could not build the stock-universe optimisation from the workbook: {e}")
 
 
 # =========================================================
@@ -900,13 +988,13 @@ if not st.session_state.onboarding_complete:
 
 
 # =========================================================
-# Page 1: Inputs
+# Inputs page
 # =========================================================
 if st.session_state.page == "inputs":
     if is_experienced_find_mode():
         st.title("Asset Finder Preferences")
         st.caption(
-            "Experienced Investor path: choose your risk profile and ESG preferences below. The app will only show the stock-universe frontier tab."
+            "Experienced Investor path: choose your risk profile and ESG preferences below. The app will only show the stock-universe optimisation tab."
         )
 
         with st.form("stock_finder_form"):
@@ -958,13 +1046,13 @@ if st.session_state.page == "inputs":
                 )
 
             st.markdown("---")
-            st.subheader("Firm-level frontier settings")
-            frontier_points = st.slider(
-                "Points for stock-universe frontier",
-                30,
-                150,
-                int(st.session_state.frontier_points),
-                10,
+            st.subheader("Optimisation settings")
+            sample_points = st.slider(
+                "Random portfolios sampled for the stock-universe plot",
+                500,
+                10000,
+                int(st.session_state.sample_points),
+                500,
             )
             trading_days = st.slider(
                 "Trading days used to annualise daily covariance",
@@ -974,7 +1062,7 @@ if st.session_state.page == "inputs":
                 1,
             )
 
-            submitted = st.form_submit_button("Continue to stock finder")
+            submitted = st.form_submit_button("Continue to stock optimisation")
 
         if submitted:
             gamma_value = float(custom_gamma) if risk_choice == "Custom" else RISK_MAP[risk_choice]
@@ -984,7 +1072,7 @@ if st.session_state.page == "inputs":
             st.session_state.lambda_esg = lambda_value
             st.session_state.risk_profile = risk_choice
             st.session_state.esg_profile = esg_choice
-            st.session_state.frontier_points = frontier_points
+            st.session_state.sample_points = sample_points
             st.session_state.trading_days = trading_days
             go_to("results")
 
@@ -993,7 +1081,7 @@ if st.session_state.page == "inputs":
 
         if is_experienced_existing_mode():
             st.caption(
-                "Experienced Investor path: enter your existing 2-asset combination below. The app will only show the theoretical tab."
+                "Experienced Investor path: enter your existing 2-asset combination below. The app will only show the theoretical optimisation tab."
             )
         else:
             st.caption("These are the current model assumptions. You can still edit them if you want.")
@@ -1057,7 +1145,7 @@ if st.session_state.page == "inputs":
 
             st.markdown("---")
 
-            st.subheader("Portfolio inputs")
+            st.subheader("Model inputs")
             rf_pct = st.number_input(
                 "Risk-free rate (%)",
                 0.0,
@@ -1073,11 +1161,11 @@ if st.session_state.page == "inputs":
                 float(st.session_state.rho),
                 0.01,
             )
-            num_points = st.slider(
-                "Number of portfolio weight points",
-                101,
+            mix_points = st.slider(
+                "Points used for the two-asset plot",
+                201,
                 5001,
-                int(st.session_state.num_points),
+                int(st.session_state.mix_points),
                 100,
             )
 
@@ -1093,22 +1181,21 @@ if st.session_state.page == "inputs":
             )
             gamma = st.number_input(
                 "Risk aversion γ",
-                0.0,
-                50.0,
-                float(st.session_state.gamma),
-                0.10,
+                min_value=0.1,
+                max_value=50.0,
+                value=float(max(st.session_state.gamma, 0.1)),
+                step=0.10,
                 format="%.2f",
             )
 
             st.markdown("---")
-
-            st.subheader("Firm-level frontier settings")
-            frontier_points = st.slider(
-                "Points for stock-universe frontier",
-                30,
-                150,
-                int(st.session_state.frontier_points),
-                10,
+            st.subheader("Stock-universe settings")
+            sample_points = st.slider(
+                "Random portfolios sampled for the stock-universe plot",
+                500,
+                10000,
+                int(st.session_state.sample_points),
+                500,
             )
             trading_days = st.slider(
                 "Trading days used to annualise daily covariance",
@@ -1129,10 +1216,10 @@ if st.session_state.page == "inputs":
             st.session_state.esg2 = esg2
             st.session_state.rf_pct = rf_pct
             st.session_state.rho = rho
-            st.session_state.num_points = num_points
+            st.session_state.mix_points = mix_points
             st.session_state.lambda_esg = lambda_esg
             st.session_state.gamma = gamma
-            st.session_state.frontier_points = frontier_points
+            st.session_state.sample_points = sample_points
             st.session_state.trading_days = trading_days
             go_to("results")
 
@@ -1146,7 +1233,7 @@ if st.session_state.page == "inputs":
 
 
 # =========================================================
-# Page 2: Results
+# Results page
 # =========================================================
 elif st.session_state.page == "results":
     st.title("Results")
@@ -1158,108 +1245,39 @@ elif st.session_state.page == "results":
         st.success(
             f"First-time user mode active. Risk aversion γ = {st.session_state.gamma:.2f} and ESG intensity λ = {st.session_state.lambda_esg:.2f}."
         )
-        st.caption("You are seeing both tabs: the theoretical model and the stock-universe frontier.")
+        st.caption("You are seeing both tabs: the theoretical optimisation and the stock-universe optimisation.")
     elif is_experienced_existing_mode():
         st.info(
-            "Experienced Investor path: only the theoretical model tab is shown because you already have 2 assets."
+            "Experienced Investor path: only the theoretical optimisation tab is shown because you already have 2 assets."
         )
     elif is_experienced_find_mode():
         st.info(
-            "Experienced Investor path: only the stock-universe frontier tab is shown because you asked the app to help find an asset combination."
+            "Experienced Investor path: only the stock-universe optimisation tab is shown because you asked the app to help find an asset combination."
         )
 
-    theoretical_payload = None
-    esg_cutoff = None
-
-    if show_theoretical:
-        mu = np.array([st.session_state.mu1_pct, st.session_state.mu2_pct]) / 100.0
-        sigma = np.array([st.session_state.sigma1_pct, st.session_state.sigma2_pct]) / 100.0
-        rf = st.session_state.rf_pct / 100.0
-        rho = st.session_state.rho
-        esg_scores = np.array([st.session_state.esg1, st.session_state.esg2]) / 100.0
-        lambda_esg = st.session_state.lambda_esg
-        gamma = st.session_state.gamma
-        num_points = st.session_state.num_points
-
-        df_all = build_portfolio_grid(
-            mu=mu,
-            sigma=sigma,
-            rho=rho,
-            rf=rf,
-            esg_scores=esg_scores,
-            gamma=gamma,
-            lambda_esg=lambda_esg,
-            num_points=num_points,
-        )
-
-        esg_cutoff = required_esg_threshold(df_all, lambda_esg)
-        df_esg = df_all[df_all["ESG Score"] >= esg_cutoff - 1e-12].copy()
-        if df_esg.empty:
-            df_esg = df_all.loc[[df_all["ESG Score"].idxmax()]].copy()
-
-        # FIX APPLIED HERE
-        mvp_std, tan_std = select_key_portfolios(df_all, rf)
-        mvp_esg, tan_esg = select_key_portfolios(df_esg, rf)
-
-        # Safety check: the ESG-feasible set is a subset of the unrestricted set,
-        # so its max Sharpe should not exceed the unrestricted max Sharpe.
-        if tan_esg["Sharpe Ratio"] > tan_std["Sharpe Ratio"] + 1e-12:
-            st.warning(
-                "Unexpected result detected: the ESG-screened Sharpe exceeds the unrestricted Sharpe. "
-                "Please rerun the app or clear cache."
-            )
-
-        m_col1, m_col2, m_col3, m_col4 = st.columns(4)
-        m_col1.metric("ESG Cutoff", f"{esg_cutoff * 100:.1f}/100", f"λ = {lambda_esg:.2f}")
-        m_col2.metric(
-            "Tangency Return",
-            f"{tan_std['Expected Return'] * 100:.1f}%",
-            f"Sharpe {tan_std['Sharpe Ratio']:.3f}",
-        )
-        m_col3.metric("MVP Std Dev", f"{mvp_std['Std Dev'] * 100:.1f}%")
-        m_col4.metric("ESG Tangency Sharpe", f"{tan_esg['Sharpe Ratio']:.3f}", "Post-screen")
-
-        std_summary = summary_df(mvp_std, tan_std, ("Minimum Variance Portfolio", "Tangency Portfolio"))
-        esg_summary = summary_df(
-            mvp_esg,
-            tan_esg,
-            ("ESG Minimum Variance Portfolio", "ESG Tangency Portfolio"),
-        )
-
-        st.markdown(
-            f"""
-            **ESG screen used in the 2-asset ESG graph**
-
-            Required portfolio ESG score = **{esg_cutoff * 100:.2f} / 100**
-            """
-        )
-
-        theoretical_payload = {
-            "df_all": df_all,
-            "df_esg": df_esg,
-            "rf": rf,
-            "mvp_std": mvp_std,
-            "tan_std": tan_std,
-            "mvp_esg": mvp_esg,
-            "tan_esg": tan_esg,
-            "std_summary": std_summary,
-            "esg_summary": esg_summary,
-        }
+    mu = np.array([st.session_state.mu1_pct, st.session_state.mu2_pct]) / 100.0
+    sigma = np.array([st.session_state.sigma1_pct, st.session_state.sigma2_pct]) / 100.0
+    rf = st.session_state.rf_pct / 100.0
+    rho = st.session_state.rho
+    esg_scores = np.array([st.session_state.esg1, st.session_state.esg2]) / 100.0
+    gamma = float(st.session_state.gamma)
+    lambda_esg = float(st.session_state.lambda_esg)
+    mix_points = int(st.session_state.mix_points)
 
     if show_theoretical and show_stock:
-        tab_analysis, tab_stock = st.tabs(["Theoretical model", "Stock-universe frontier"])
-        with tab_analysis:
-            render_theoretical_tab(**theoretical_payload)
-        with tab_stock:
-            render_stock_tab(esg_cutoff)
+        tab1, tab2 = st.tabs(["Theoretical optimisation", "Stock-universe optimisation"])
+        with tab1:
+            render_theoretical_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg, mix_points)
+        with tab2:
+            render_stock_tab(lambda_esg=lambda_esg, gamma=gamma, rf=rf)
     elif show_theoretical:
-        tab_analysis = st.tabs(["Theoretical model"])[0]
-        with tab_analysis:
-            render_theoretical_tab(**theoretical_payload)
+        tab1 = st.tabs(["Theoretical optimisation"])[0]
+        with tab1:
+            render_theoretical_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg, mix_points)
     elif show_stock:
-        tab_stock = st.tabs(["Stock-universe frontier"])[0]
-        with tab_stock:
-            render_stock_tab(esg_cutoff)
+        tab2 = st.tabs(["Stock-universe optimisation"])[0]
+        with tab2:
+            render_stock_tab(lambda_esg=lambda_esg, gamma=gamma, rf=rf)
 
     col1, col2, col3 = st.columns(3)
     with col1:
