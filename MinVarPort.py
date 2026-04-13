@@ -1292,8 +1292,8 @@ def render_stock_tab(lambda_esg: float, gamma: float, rf: float):
             zorder=5,
         )
         ax.annotate(
-            "benchmark optimum
-(λ = 0)",
+            "benchmark optimum" + "
+" + "(λ = 0)",
             xy=(benchmark_opt["Std Dev"] * 100, benchmark_opt["Expected Return"] * 100),
             xytext=(-70, 12),
             textcoords="offset points",
