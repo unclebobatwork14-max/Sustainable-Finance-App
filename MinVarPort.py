@@ -705,7 +705,57 @@ def build_two_asset_risky_frontier(
         risky_return = float(np.dot(p, mu))
         variance = float(np.dot(p, np.dot(cov, p)))
         std_dev = float(np.sqrt(max(variance, 0.0)))
-        avg_esg = float(np.dot(p, esg
+        avg_esg = float(np.dot(p, esg_scores))
+        sharpe = np.nan if std_dev <= 1e-12 else (risky_return - rf) / std_dev
+        rows.append(
+            {
+                "Mix Asset 1": p1,
+                "Mix Asset 2": 1.0 - p1,
+                "Risky Return": risky_return,
+                "Std Dev": std_dev,
+                "Average ESG": avg_esg,
+                "Sharpe Ratio": sharpe,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def esg_frontier_cutoff(frontier_df: pd.DataFrame, lambda_esg: float) -> float:
+    s_min = float(frontier_df["Average ESG"].min())
+    s_max = float(frontier_df["Average ESG"].max())
+    return s_min + lambda_esg * (s_max - s_min)
+
+
+def tangency_from_frontier(frontier_df: pd.DataFrame) -> pd.Series:
+    valid = frontier_df[np.isfinite(frontier_df["Sharpe Ratio"])].copy()
+    return valid.loc[valid["Sharpe Ratio"].idxmax()].copy()
+
+
+def plot_frontier_cml(ax, frontier_df: pd.DataFrame, rf: float, color: str, label: str, tangency_label: str):
+    x = frontier_df["Std Dev"] * 100
+    y = frontier_df["Risky Return"] * 100
+    tan = tangency_from_frontier(frontier_df)
+    rf_plot = rf * 100
+
+    ax.plot(x, y, color=color, linewidth=2.5, label=label)
+    sigma_line = np.linspace(0.0, max(float(x.max()), float(tan["Std Dev"] * 100)) * 1.10, 200)
+    cml = rf_plot + float(tan["Sharpe Ratio"]) * sigma_line
+    ax.plot(sigma_line, cml, color=color, linewidth=1.8, linestyle=(0, (3, 3)))
+    ax.scatter([0], [rf_plot], color=LIGHT_GREY, s=35, zorder=3)
+    ax.scatter([tan["Std Dev"] * 100], [tan["Risky Return"] * 100], color=color, s=55, zorder=4)
+    ax.annotate(
+        tangency_label,
+        xy=(tan["Std Dev"] * 100, tan["Risky Return"] * 100),
+        xytext=(16, -14),
+        textcoords="offset points",
+        color=color,
+        fontsize=9,
+        arrowprops=dict(arrowstyle="->", color=color, lw=1.1),
+    )
+    return tan
+
+
+@st.cache_data
 def sample_simplex_cloud(n_assets: int, n_samples: int, seed: int = 123) -> np.ndarray:
     rng = np.random.default_rng(seed)
     cloud = rng.dirichlet(np.ones(n_assets), size=n_samples)
@@ -893,6 +943,126 @@ def render_theoretical_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg, mi
 
     st.subheader("Risky-asset weights: chosen ESG taste")
     st.dataframe(format_weight_table(add_currency_to_weight_table(esg_weights, investment_amount)), use_container_width=True)
+
+
+
+def render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg, mix_points):
+    cov = var_covar(sigma, rho)
+    benchmark_opt, _ = solve_optimal_portfolio(
+        mu=mu,
+        cov=cov,
+        esg_scores=esg_scores,
+        gamma=gamma,
+        lambda_esg=0.0,
+        rf=rf,
+        asset_names=["Asset 1", "Asset 2"],
+    )
+    esg_opt, _ = solve_optimal_portfolio(
+        mu=mu,
+        cov=cov,
+        esg_scores=esg_scores,
+        gamma=gamma,
+        lambda_esg=lambda_esg,
+        rf=rf,
+        asset_names=["Asset 1", "Asset 2"],
+    )
+
+    frontier_all = build_two_asset_risky_frontier(mu, sigma, rho, rf, esg_scores, mix_points)
+    cutoff = esg_frontier_cutoff(frontier_all, lambda_esg)
+    frontier_esg = frontier_all[frontier_all["Average ESG"] >= cutoff - 1e-12].copy()
+    if frontier_esg.empty:
+        frontier_esg = frontier_all.loc[[frontier_all["Average ESG"].idxmax()]].copy()
+
+    st.subheader("Frontier and CML visualisation")
+    st.caption(
+        "These graphs are visual aids. The optimisation itself still follows the corrected objective function with risky weights that do not need to sum to one."
+    )
+
+    fig1, ax1 = plt.subplots(figsize=(10, 6))
+    plot_frontier_cml(
+        ax=ax1,
+        frontier_df=frontier_all,
+        rf=rf,
+        color=THEORETICAL_BLUE,
+        label="Mean-variance frontier (without ESG screen)",
+        tangency_label="tangency portfolio",
+    )
+    ax1.scatter(
+        [benchmark_opt["Std Dev"] * 100],
+        [benchmark_opt["Expected Return"] * 100],
+        color=THEORETICAL_BLUE,
+        s=65,
+        zorder=5,
+    )
+    ax1.annotate(
+        "objective-optimal portfolio",
+        xy=(benchmark_opt["Std Dev"] * 100, benchmark_opt["Expected Return"] * 100),
+        xytext=(-90, 12),
+        textcoords="offset points",
+        color=THEORETICAL_BLUE,
+        fontsize=9,
+        arrowprops=dict(arrowstyle="->", color=THEORETICAL_BLUE, lw=1.2),
+    )
+    ax1.set_xlabel("Std")
+    ax1.set_ylabel("Expected return")
+    ax1.set_title("Without ESG consideration")
+    style_axis(ax1)
+    st.pyplot(fig1)
+
+    fig2, ax2 = plt.subplots(figsize=(10, 6))
+    ax2.plot(
+        frontier_all["Std Dev"] * 100,
+        frontier_all["Risky Return"] * 100,
+        color=THEORETICAL_BLUE,
+        linewidth=2.1,
+        alpha=0.7,
+    )
+    plot_frontier_cml(
+        ax=ax2,
+        frontier_df=frontier_esg,
+        rf=rf,
+        color=ESG_GREEN,
+        label="Mean-variance frontier (with ESG screen)",
+        tangency_label="ESG tangency portfolio",
+    )
+    ax2.scatter(
+        [esg_opt["Std Dev"] * 100],
+        [esg_opt["Expected Return"] * 100],
+        color=ESG_GREEN,
+        s=65,
+        zorder=5,
+    )
+    ax2.annotate(
+        "objective-optimal portfolio",
+        xy=(esg_opt["Std Dev"] * 100, esg_opt["Expected Return"] * 100),
+        xytext=(18, -16),
+        textcoords="offset points",
+        color=ESG_GREEN,
+        fontsize=9,
+        arrowprops=dict(arrowstyle="->", color=ESG_GREEN, lw=1.2),
+    )
+    ax2.set_xlabel("Std")
+    ax2.set_ylabel("Expected return")
+    ax2.set_title("With ESG consideration")
+    style_axis(ax2)
+    st.pyplot(fig2)
+
+    st.dataframe(
+        pd.DataFrame(
+            [{
+                "ESG screen cutoff used in visual frontier": cutoff,
+                "Objective-optimal benchmark return": float(benchmark_opt["Expected Return"]),
+                "Objective-optimal ESG return": float(esg_opt["Expected Return"]),
+            }]
+        ).style.format(
+            {
+                "ESG screen cutoff used in visual frontier": "{:.2%}",
+                "Objective-optimal benchmark return": "{:.2%}",
+                "Objective-optimal ESG return": "{:.2%}",
+            }
+        ),
+        use_container_width=True,
+    )
 
 
 
@@ -1324,15 +1494,26 @@ elif st.session_state.page == "results":
     mix_points = int(st.session_state.mix_points)
 
     if show_theoretical and show_stock:
-        tab1, tab2 = st.tabs(["Theoretical optimisation", "Stock-universe optimisation"])
+        tab1, tab_frontier, tab2 = st.tabs([
+            "Theoretical optimisation",
+            "Frontier + CML visualisation",
+            "Stock-universe optimisation",
+        ])
         with tab1:
             render_theoretical_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg, mix_points)
+        with tab_frontier:
+            render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg, mix_points)
         with tab2:
             render_stock_tab(lambda_esg=lambda_esg, gamma=gamma, rf=rf)
     elif show_theoretical:
-        tab1 = st.tabs(["Theoretical optimisation"])[0]
+        tab1, tab_frontier = st.tabs([
+            "Theoretical optimisation",
+            "Frontier + CML visualisation",
+        ])
         with tab1:
             render_theoretical_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg, mix_points)
+        with tab_frontier:
+            render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg, mix_points)
     elif show_stock:
         tab2 = st.tabs(["Stock-universe optimisation"])[0]
         with tab2:
