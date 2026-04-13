@@ -1,6 +1,5 @@
 import streamlit as st
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 from matplotlib.ticker import PercentFormatter
 import numpy as np
 import pandas as pd
@@ -268,6 +267,8 @@ def required_esg_threshold(df: pd.DataFrame, lambda_esg: float) -> float:
     return s_min + lambda_esg * (s_max - s_min)
 
 
+# FIX: recompute Sharpe inside the selector using the same rf everywhere
+# so the unrestricted tangency is always compared consistently with the ESG subset.
 def select_key_portfolios(df: pd.DataFrame, rf: float):
     work = df.copy()
     work["Sharpe Ratio"] = np.where(
@@ -505,301 +506,58 @@ def annualise_covariance(daily_cov: pd.DataFrame, trading_days: int) -> pd.DataF
 
 
 # =========================================================
-# Plot style helpers  — reference-image style
+# Plot style helpers
 # =========================================================
-# Colours matching the reference charts
-BLUE_MAIN   = "#1a3a6b"   # deep navy blue for standard frontier
-GREEN_MAIN  = "#1a7a5e"   # dark teal-green for ESG frontier
-GREY_DOTTED = "#999999"   # grey for CML / dotted lines
-
-# Tick-mark density on the efficient portion
-TICK_EVERY = 8   # place a tick marker every N points along efficient frontier
+THEORETICAL_BLUE = "#1f77b4"
+ESG_GREEN = "#2ca02c"
+LIGHT_GREY = "#bfbfbf"
 
 
-def _apply_reference_style(ax, x_max: float, y_max: float):
-    """Apply the clean academic style from the reference image."""
-    ax.set_facecolor("white")
-    fig = ax.get_figure()
-    fig.patch.set_facecolor("white")
-
-    # Tight box frame (all four sides visible, thin)
-    for spine in ax.spines.values():
-        spine.set_visible(True)
-        spine.set_linewidth(0.8)
-        spine.set_color("#333333")
-
+def style_frontier_axis(ax, x_max: float, y_max: float):
     ax.set_xlim(0, x_max)
     ax.set_ylim(0, y_max)
-
-    # Light grey horizontal gridlines only (very subtle)
-    ax.yaxis.grid(True, color="#e0e0e0", linewidth=0.5, zorder=0)
-    ax.xaxis.grid(False)
-    ax.set_axisbelow(True)
-
+    ax.grid(False)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_color(LIGHT_GREY)
+    ax.spines["bottom"].set_color(LIGHT_GREY)
+    ax.spines["left"].set_linewidth(1.0)
+    ax.spines["bottom"].set_linewidth(1.0)
+    ax.tick_params(axis="both", colors="#666666", length=3, width=1)
     ax.xaxis.set_major_formatter(PercentFormatter(xmax=100, decimals=0))
     ax.yaxis.set_major_formatter(PercentFormatter(xmax=100, decimals=0))
 
-    ax.tick_params(axis="both", labelsize=9, colors="#333333", length=3, width=0.7)
-    ax.set_xlabel("Std", fontsize=10, color="#333333", labelpad=6)
-    ax.set_ylabel("Expected return", fontsize=10, color="#333333", labelpad=6)
 
+def plot_two_asset_frontier(ax, x, y, color, label, rf_plot, tangency, mvp, tangent_label, mvp_label, frontier_label, cml_color):
+    # Sort by weight order already present in x/y so the full frontier keeps the Markowitz shape
+    ax.plot(x, y, color=color, linewidth=2.6, label=frontier_label)
 
-def _add_tick_marks(ax, x_series, y_series, color, every=TICK_EVERY):
-    """
-    Place small perpendicular tick marks along the curve, matching the
-    reference-image style where dots/ticks appear on the efficient portion.
-    """
-    xs = np.array(x_series)
-    ys = np.array(y_series)
-    indices = range(0, len(xs), every)
-    ax.scatter(
-        xs[list(indices)],
-        ys[list(indices)],
-        marker="|",
-        s=40,
-        color=color,
-        linewidths=1.2,
-        zorder=5,
-    )
+    x_max_line = max(float(np.max(x)), float(tangency["Std Dev"] * 100)) * 1.10
+    sigma_line = np.linspace(0, x_max_line, 200)
+    cml = rf_plot + float(tangency["Sharpe Ratio"]) * sigma_line
+    ax.plot(sigma_line, cml, linestyle=(0, (2, 2)), color=cml_color, linewidth=1.8)
 
+    ax.scatter([0], [rf_plot], color=LIGHT_GREY, s=40, zorder=3)
+    ax.scatter([mvp["Std Dev"] * 100], [mvp["Expected Return"] * 100], color=color, marker="o", s=55, zorder=4)
+    ax.scatter([tangency["Std Dev"] * 100], [tangency["Expected Return"] * 100], color=color, marker="o", s=65, zorder=5)
 
-def _draw_cml(ax, rf_pct, tangency, color, linestyle=(0, (3, 3)), x_max=None):
-    """Draw the Capital Market Line as a dotted line from rf through tangency."""
-    if x_max is None:
-        x_max = tangency["Std Dev"] * 100 * 1.6
-    sigma_line = np.linspace(0, x_max, 300)
-    cml = rf_pct + float(tangency["Sharpe Ratio"]) * sigma_line
-    ax.plot(sigma_line, cml, linestyle=linestyle, color=color, linewidth=1.4, zorder=2)
-    # rf intercept dot
-    ax.scatter([0], [rf_pct], color=color, s=18, zorder=4, clip_on=False)
-
-
-def _annotate(ax, text, xy, xytext, color, fontsize=8.5):
     ax.annotate(
-        text,
-        xy=xy,
-        xytext=xytext,
-        textcoords="offset points",
-        color=color,
-        fontsize=fontsize,
-        arrowprops=dict(arrowstyle="->", color=color, lw=0.9),
-        ha="center",
-    )
-
-
-# =========================================================
-# Main plot functions
-# =========================================================
-
-def plot_standard_frontier(ax, df_all, rf, mvp, tangency):
-    """
-    Graph 1: standard mean-variance frontier with CML.
-    Style mirrors the reference image top chart.
-    """
-    x = df_all["Std Dev"] * 100
-    y = df_all["Expected Return"] * 100
-    rf_pct = rf * 100
-
-    x_max = max(float(x.max()) * 1.18, 55)
-    y_max = max(float(y.max()) * 1.20, 12)
-
-    _apply_reference_style(ax, x_max, y_max)
-
-    # Full frontier curve (the whole bullet)
-    ax.plot(x, y, color=BLUE_MAIN, linewidth=2.0, zorder=3, solid_capstyle="round")
-
-    # Tick marks on efficient portion only (above MVP)
-    mvp_std = mvp["Std Dev"] * 100
-    eff_mask = x >= mvp_std - 0.01
-    _add_tick_marks(ax, x[eff_mask], y[eff_mask], color=BLUE_MAIN, every=TICK_EVERY)
-
-    # CML (dotted grey)
-    _draw_cml(ax, rf_pct, tangency, color=GREY_DOTTED, x_max=x_max)
-
-    # Key portfolio markers
-    ax.scatter(
-        [tangency["Std Dev"] * 100], [tangency["Expected Return"] * 100],
-        color=BLUE_MAIN, s=50, zorder=6, marker="o",
-    )
-    ax.scatter(
-        [mvp["Std Dev"] * 100], [mvp["Expected Return"] * 100],
-        color=BLUE_MAIN, s=35, zorder=6, marker="o",
-    )
-
-    # Annotations
-    _annotate(
-        ax,
-        "mean-variance\nefficient frontier",
-        xy=(float(x[eff_mask].iloc[len(x[eff_mask]) * 2 // 3]), float(y[eff_mask].iloc[len(y[eff_mask]) * 2 // 3])),
-        xytext=(40, 25),
-        color=BLUE_MAIN,
-    )
-    _annotate(
-        ax,
-        "tangency portfolio",
+        tangent_label,
         xy=(tangency["Std Dev"] * 100, tangency["Expected Return"] * 100),
-        xytext=(-55, 12),
-        color=BLUE_MAIN,
-    )
-    _annotate(
-        ax,
-        "mean-variance\nfrontier",
-        xy=(float(x.iloc[len(x) // 4]), float(y.iloc[len(y) // 4])),
-        xytext=(-10, -30),
-        color=BLUE_MAIN,
-    )
-
-    # Sharpe ratio angle label
-    ax.annotate(
-        "Sharpe ratio\n(SR)",
-        xy=(mvp["Std Dev"] * 100 * 0.6, rf_pct + tangency["Sharpe Ratio"] * mvp["Std Dev"] * 100 * 0.5),
-        xytext=(-30, -22),
+        xytext=(-55, 10),
         textcoords="offset points",
-        color=GREY_DOTTED,
+        color=color,
+        fontsize=9,
+        arrowprops=dict(arrowstyle="->", color=color, lw=1.2),
+    )
+    ax.annotate(
+        mvp_label,
+        xy=(mvp["Std Dev"] * 100, mvp["Expected Return"] * 100),
+        xytext=(12, -14),
+        textcoords="offset points",
+        color=color,
         fontsize=8,
-        ha="center",
     )
-
-
-def plot_esg_frontier(ax, df_all, df_esg, rf, mvp_std, tan_std, mvp_esg, tan_esg):
-    """
-    Graph 2: overlaid standard (blue) + ESG-screened (green) frontiers.
-    Style mirrors the reference image bottom chart.
-    """
-    x_all = df_all["Std Dev"] * 100
-    y_all = df_all["Expected Return"] * 100
-    x_esg = df_esg["Std Dev"] * 100
-    y_esg = df_esg["Expected Return"] * 100
-    rf_pct = rf * 100
-
-    x_max = max(float(x_all.max()) * 1.18, float(x_esg.max()) * 1.18, 55)
-    y_max = max(float(y_all.max()) * 1.20, float(y_esg.max()) * 1.20, 12)
-
-    _apply_reference_style(ax, x_max, y_max)
-
-    # ── Blue: all-assets frontier ──────────────────────────────────────────
-    ax.plot(x_all, y_all, color=BLUE_MAIN, linewidth=2.0, zorder=3)
-    mvp_std_val = mvp_std["Std Dev"] * 100
-    eff_all = x_all >= mvp_std_val - 0.01
-    _add_tick_marks(ax, x_all[eff_all], y_all[eff_all], color=BLUE_MAIN, every=TICK_EVERY)
-    _draw_cml(ax, rf_pct, tan_std, color=BLUE_MAIN, linestyle=(0, (4, 4)), x_max=x_max)
-
-    # ── Green: ESG-screened frontier ──────────────────────────────────────
-    ax.plot(x_esg, y_esg, color=GREEN_MAIN, linewidth=2.2, zorder=4)
-    mvp_esg_val = mvp_esg["Std Dev"] * 100
-    eff_esg = x_esg >= mvp_esg_val - 0.01
-    _add_tick_marks(ax, x_esg[eff_esg], y_esg[eff_esg], color=GREEN_MAIN, every=TICK_EVERY)
-    _draw_cml(ax, rf_pct, tan_esg, color=GREEN_MAIN, linestyle=(0, (6, 3)), x_max=x_max)
-
-    # ── Key markers ────────────────────────────────────────────────────────
-    ax.scatter(
-        [tan_std["Std Dev"] * 100], [tan_std["Expected Return"] * 100],
-        color=BLUE_MAIN, s=50, zorder=7, marker="o",
-    )
-    ax.scatter(
-        [tan_esg["Std Dev"] * 100], [tan_esg["Expected Return"] * 100],
-        color=GREEN_MAIN, s=50, zorder=7, marker="o",
-    )
-    ax.scatter(
-        [mvp_std["Std Dev"] * 100], [mvp_std["Expected Return"] * 100],
-        color=BLUE_MAIN, s=35, zorder=6, marker="o",
-    )
-    ax.scatter(
-        [mvp_esg["Std Dev"] * 100], [mvp_esg["Expected Return"] * 100],
-        color=GREEN_MAIN, s=35, zorder=6, marker="o",
-    )
-
-    # ── Annotations ────────────────────────────────────────────────────────
-    _annotate(
-        ax,
-        "tagency portfolio\n(all assets)",
-        xy=(tan_std["Std Dev"] * 100, tan_std["Expected Return"] * 100),
-        xytext=(-62, 14),
-        color=BLUE_MAIN,
-    )
-    _annotate(
-        ax,
-        "tagency portfolio\n(portfolios with given ESG)",
-        xy=(tan_esg["Std Dev"] * 100, tan_esg["Expected Return"] * 100),
-        xytext=(50, -18),
-        color=GREEN_MAIN,
-    )
-
-    # Label the two curves mid-way along inefficient portion
-    mid_all = len(x_all) // 5
-    _annotate(
-        ax,
-        "mean-variance frontier\n(all assets)",
-        xy=(float(x_all.iloc[mid_all]), float(y_all.iloc[mid_all])),
-        xytext=(14, -32),
-        color=BLUE_MAIN,
-    )
-    mid_esg = max(1, len(x_esg) // 5)
-    _annotate(
-        ax,
-        "mean-variance frontier\n(portfolios with given ESG)",
-        xy=(float(x_esg.iloc[mid_esg]), float(y_esg.iloc[mid_esg])),
-        xytext=(60, 10),
-        color=GREEN_MAIN,
-    )
-
-
-def plot_stock_universe_frontiers(ax, frontier_all, frontier_scr, gmv_all, gmv_scr):
-    """
-    Graph 3: stock-universe efficient frontiers (all stocks vs ESG-screened).
-    """
-    all_eff = frontier_all[frontier_all["Efficient"]].copy()
-    scr_eff = frontier_scr[frontier_scr["Efficient"]].copy()
-
-    x_max = max(float(all_eff["Std Dev"].max()) * 100 * 1.18,
-                float(scr_eff["Std Dev"].max()) * 100 * 1.18, 55)
-    y_max = max(float(all_eff["Expected Return"].max()) * 100 * 1.20,
-                float(scr_eff["Expected Return"].max()) * 100 * 1.20, 12)
-
-    _apply_reference_style(ax, x_max, y_max)
-
-    # Blue: all-stocks efficient frontier
-    ax.plot(
-        all_eff["Std Dev"] * 100, all_eff["Expected Return"] * 100,
-        color=BLUE_MAIN, linewidth=2.2, zorder=3,
-    )
-    _add_tick_marks(ax, all_eff["Std Dev"] * 100, all_eff["Expected Return"] * 100,
-                    color=BLUE_MAIN, every=max(1, len(all_eff) // 10))
-
-    # Green: ESG-screened efficient frontier
-    ax.plot(
-        scr_eff["Std Dev"] * 100, scr_eff["Expected Return"] * 100,
-        color=GREEN_MAIN, linewidth=2.2, zorder=4,
-    )
-    _add_tick_marks(ax, scr_eff["Std Dev"] * 100, scr_eff["Expected Return"] * 100,
-                    color=GREEN_MAIN, every=max(1, len(scr_eff) // 10))
-
-    # MVP markers
-    ax.scatter(
-        [gmv_all["Std Dev"] * 100], [gmv_all["Expected Return"] * 100],
-        color=BLUE_MAIN, s=50, zorder=6, marker="o",
-    )
-    ax.scatter(
-        [gmv_scr["Std Dev"] * 100], [gmv_scr["Expected Return"] * 100],
-        color=GREEN_MAIN, s=50, zorder=6, marker="o",
-    )
-
-    _annotate(
-        ax,
-        "minimum variance\n(all stocks)",
-        xy=(gmv_all["Std Dev"] * 100, gmv_all["Expected Return"] * 100),
-        xytext=(-60, 16),
-        color=BLUE_MAIN,
-    )
-    _annotate(
-        ax,
-        "minimum variance\n(ESG-screened)",
-        xy=(gmv_scr["Std Dev"] * 100, gmv_scr["Expected Return"] * 100),
-        xytext=(55, -18),
-        color=GREEN_MAIN,
-    )
-
-    ax.set_title("All-stock theoretical frontier vs ESG-screened frontier", fontsize=10, color="#333333", pad=8)
 
 
 # =========================================================
@@ -817,17 +575,102 @@ def render_theoretical_tab(
     esg_summary: pd.DataFrame,
 ):
     st.subheader("1) Standard mean-variance frontier and CML")
-    fig1, ax1 = plt.subplots(figsize=(8, 5.5), dpi=120)
-    plot_standard_frontier(ax1, df_all, rf, mvp_std, tan_std)
-    fig1.tight_layout()
+    fig1, ax1 = plt.subplots(figsize=(10, 6))
+    x_all = df_all["Std Dev"] * 100
+    y_all = df_all["Expected Return"] * 100
+    rf_plot = rf * 100
+
+    plot_two_asset_frontier(
+        ax=ax1,
+        x=x_all,
+        y=y_all,
+        color=THEORETICAL_BLUE,
+        label="All portfolios",
+        rf_plot=rf_plot,
+        tangency=tan_std,
+        mvp=mvp_std,
+        tangent_label="tangency portfolio",
+        mvp_label="minimum variance portfolio",
+        frontier_label="mean-variance frontier",
+        cml_color=LIGHT_GREY,
+    )
+    ax1.set_xlabel("Std")
+    ax1.set_ylabel("Expected return")
+    ax1.set_title("Standard frontier: all portfolios")
+    style_frontier_axis(ax1, x_max=max(float(x_all.max()) * 1.15, 50), y_max=max(float(y_all.max()) * 1.10, 10))
     st.pyplot(fig1)
     st.subheader("Summary table: Standard graph")
     st.dataframe(format_table(std_summary), use_container_width=True)
 
     st.subheader("2) ESG-screened frontier and CML")
-    fig2, ax2 = plt.subplots(figsize=(8, 5.5), dpi=120)
-    plot_esg_frontier(ax2, df_all, df_esg, rf, mvp_std, tan_std, mvp_esg, tan_esg)
-    fig2.tight_layout()
+    fig2, ax2 = plt.subplots(figsize=(10, 6))
+    x_all_overlay = df_all["Std Dev"] * 100
+    y_all_overlay = df_all["Expected Return"] * 100
+    x_esg = df_esg["Std Dev"] * 100
+    y_esg = df_esg["Expected Return"] * 100
+
+    ax2.plot(x_all_overlay, y_all_overlay, color=THEORETICAL_BLUE, linewidth=2.2)
+    ax2.plot(x_esg, y_esg, color=ESG_GREEN, linewidth=2.6)
+
+    # All-assets tangency line for comparison
+    sigma_line_all = np.linspace(0, max(float(x_all_overlay.max()), float(tan_std["Std Dev"] * 100)) * 1.10, 200)
+    cml_all = rf_plot + float(tan_std["Sharpe Ratio"]) * sigma_line_all
+    ax2.plot(sigma_line_all, cml_all, linestyle=(0, (2, 2)), color=THEORETICAL_BLUE, linewidth=1.7, alpha=0.8)
+
+    # ESG tangency line
+    sigma_line_esg = np.linspace(0, max(float(x_esg.max()), float(tan_esg["Std Dev"] * 100)) * 1.10, 200)
+    cml_esg = rf_plot + float(tan_esg["Sharpe Ratio"]) * sigma_line_esg
+    ax2.plot(sigma_line_esg, cml_esg, linestyle=(0, (4, 3)), color=ESG_GREEN, linewidth=1.9, alpha=0.9)
+
+    ax2.scatter([0], [rf_plot], color=LIGHT_GREY, s=40, zorder=3)
+    ax2.scatter([tan_std["Std Dev"] * 100], [tan_std["Expected Return"] * 100], color=THEORETICAL_BLUE, s=60, zorder=5)
+    ax2.scatter([tan_esg["Std Dev"] * 100], [tan_esg["Expected Return"] * 100], color=ESG_GREEN, s=60, zorder=5)
+    ax2.scatter([mvp_std["Std Dev"] * 100], [mvp_std["Expected Return"] * 100], color=THEORETICAL_BLUE, s=45, zorder=4)
+    ax2.scatter([mvp_esg["Std Dev"] * 100], [mvp_esg["Expected Return"] * 100], color=ESG_GREEN, s=45, zorder=4)
+
+    ax2.annotate(
+        "tangency portfolio
+(all assets)",
+        xy=(tan_std["Std Dev"] * 100, tan_std["Expected Return"] * 100),
+        xytext=(-80, 10),
+        textcoords="offset points",
+        color=THEORETICAL_BLUE,
+        fontsize=9,
+        arrowprops=dict(arrowstyle="->", color=THEORETICAL_BLUE, lw=1.2),
+    )
+    ax2.annotate(
+        "tangency portfolio
+(portfolios with given ESG)",
+        xy=(tan_esg["Std Dev"] * 100, tan_esg["Expected Return"] * 100),
+        xytext=(24, -18),
+        textcoords="offset points",
+        color=ESG_GREEN,
+        fontsize=9,
+        arrowprops=dict(arrowstyle="->", color=ESG_GREEN, lw=1.2),
+    )
+    ax2.annotate(
+        "mean-variance frontier
+(all assets)",
+        xy=(x_all_overlay.iloc[min(len(x_all_overlay) - 1, len(x_all_overlay) // 4)], y_all_overlay.iloc[min(len(y_all_overlay) - 1, len(y_all_overlay) // 4)]),
+        xytext=(28, -30),
+        textcoords="offset points",
+        color=THEORETICAL_BLUE,
+        fontsize=9,
+    )
+    ax2.annotate(
+        "mean-variance frontier
+(portfolios with given ESG)",
+        xy=(x_esg.iloc[min(len(x_esg) - 1, max(1, len(x_esg) // 2))], y_esg.iloc[min(len(y_esg) - 1, max(1, len(y_esg) // 2))]),
+        xytext=(20, 10),
+        textcoords="offset points",
+        color=ESG_GREEN,
+        fontsize=9,
+    )
+
+    ax2.set_xlabel("Std")
+    ax2.set_ylabel("Expected return")
+    ax2.set_title("ESG-screened frontier")
+    style_frontier_axis(ax2, x_max=max(float(x_all_overlay.max()) * 1.15, 50), y_max=max(float(max(y_all_overlay.max(), y_esg.max())) * 1.10, 10))
     st.pyplot(fig2)
     st.subheader("Summary table: ESG graph")
     st.dataframe(format_table(esg_summary), use_container_width=True)
@@ -895,9 +738,69 @@ def render_stock_tab(esg_cutoff: float | None):
             )
 
             st.subheader("Stock-universe frontier graph")
-            fig3, ax3 = plt.subplots(figsize=(9, 5.5), dpi=120)
-            plot_stock_universe_frontiers(ax3, frontier_all, frontier_scr, gmv_all, gmv_scr)
-            fig3.tight_layout()
+            fig3, ax3 = plt.subplots(figsize=(11, 6))
+
+            all_eff = frontier_all[frontier_all["Efficient"]].copy()
+            scr_eff = frontier_scr[frontier_scr["Efficient"]].copy()
+
+            ax3.plot(
+                all_eff["Std Dev"] * 100,
+                all_eff["Expected Return"] * 100,
+                color=THEORETICAL_BLUE,
+                linewidth=2.4,
+                label="Theoretical frontier: all matched stocks",
+            )
+            ax3.plot(
+                scr_eff["Std Dev"] * 100,
+                scr_eff["Expected Return"] * 100,
+                color=ESG_GREEN,
+                linewidth=2.6,
+                label="ESG-screened frontier",
+            )
+            ax3.scatter(
+                [gmv_all["Std Dev"] * 100],
+                [gmv_all["Expected Return"] * 100],
+                color=THEORETICAL_BLUE,
+                marker="o",
+                s=55,
+                zorder=4,
+            )
+            ax3.scatter(
+                [gmv_scr["Std Dev"] * 100],
+                [gmv_scr["Expected Return"] * 100],
+                color=ESG_GREEN,
+                marker="o",
+                s=55,
+                zorder=4,
+            )
+            ax3.annotate(
+                "minimum variance
+(all stocks)",
+                xy=(gmv_all["Std Dev"] * 100, gmv_all["Expected Return"] * 100),
+                xytext=(-70, 12),
+                textcoords="offset points",
+                color=THEORETICAL_BLUE,
+                fontsize=9,
+                arrowprops=dict(arrowstyle="->", color=THEORETICAL_BLUE, lw=1.2),
+            )
+            ax3.annotate(
+                "minimum variance
+(ESG-screened)",
+                xy=(gmv_scr["Std Dev"] * 100, gmv_scr["Expected Return"] * 100),
+                xytext=(16, -18),
+                textcoords="offset points",
+                color=ESG_GREEN,
+                fontsize=9,
+                arrowprops=dict(arrowstyle="->", color=ESG_GREEN, lw=1.2),
+            )
+            ax3.set_xlabel("Std")
+            ax3.set_ylabel("Expected return")
+            ax3.set_title("All-stock theoretical frontier vs ESG-screened frontier")
+            style_frontier_axis(
+                ax3,
+                x_max=max(float(all_eff["Std Dev"].max()) * 100 * 1.15, float(scr_eff["Std Dev"].max()) * 100 * 1.15, 50),
+                y_max=max(float(all_eff["Expected Return"].max()) * 100 * 1.10, float(scr_eff["Expected Return"].max()) * 100 * 1.10, 10),
+            )
             st.pyplot(fig3)
 
             st.subheader("Minimum-variance portfolio summary")
@@ -1300,9 +1203,12 @@ elif st.session_state.page == "results":
         if df_esg.empty:
             df_esg = df_all.loc[[df_all["ESG Score"].idxmax()]].copy()
 
+        # FIX APPLIED HERE
         mvp_std, tan_std = select_key_portfolios(df_all, rf)
         mvp_esg, tan_esg = select_key_portfolios(df_esg, rf)
 
+        # Safety check: the ESG-feasible set is a subset of the unrestricted set,
+        # so its max Sharpe should not exceed the unrestricted max Sharpe.
         if tan_esg["Sharpe Ratio"] > tan_std["Sharpe Ratio"] + 1e-12:
             st.warning(
                 "Unexpected result detected: the ESG-screened Sharpe exceeds the unrestricted Sharpe. "
