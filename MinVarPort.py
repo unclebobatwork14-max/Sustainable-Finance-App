@@ -629,8 +629,7 @@ def render_theoretical_tab(
     ax2.scatter([mvp_esg["Std Dev"] * 100], [mvp_esg["Expected Return"] * 100], color=ESG_GREEN, s=45, zorder=4)
 
     ax2.annotate(
-        "tangency portfolio
-(all assets)",
+        "tangency portfolio\n(all assets)",
         xy=(tan_std["Std Dev"] * 100, tan_std["Expected Return"] * 100),
         xytext=(-80, 10),
         textcoords="offset points",
@@ -639,8 +638,7 @@ def render_theoretical_tab(
         arrowprops=dict(arrowstyle="->", color=THEORETICAL_BLUE, lw=1.2),
     )
     ax2.annotate(
-        "tangency portfolio
-(portfolios with given ESG)",
+        "tangency portfolio\n(portfolios with given ESG)",
         xy=(tan_esg["Std Dev"] * 100, tan_esg["Expected Return"] * 100),
         xytext=(24, -18),
         textcoords="offset points",
@@ -649,8 +647,7 @@ def render_theoretical_tab(
         arrowprops=dict(arrowstyle="->", color=ESG_GREEN, lw=1.2),
     )
     ax2.annotate(
-        "mean-variance frontier
-(all assets)",
+        "mean-variance frontier\n(all assets)",
         xy=(x_all_overlay.iloc[min(len(x_all_overlay) - 1, len(x_all_overlay) // 4)], y_all_overlay.iloc[min(len(y_all_overlay) - 1, len(y_all_overlay) // 4)]),
         xytext=(28, -30),
         textcoords="offset points",
@@ -658,8 +655,7 @@ def render_theoretical_tab(
         fontsize=9,
     )
     ax2.annotate(
-        "mean-variance frontier
-(portfolios with given ESG)",
+        "mean-variance frontier\n(portfolios with given ESG)",
         xy=(x_esg.iloc[min(len(x_esg) - 1, max(1, len(x_esg) // 2))], y_esg.iloc[min(len(y_esg) - 1, max(1, len(y_esg) // 2))]),
         xytext=(20, 10),
         textcoords="offset points",
@@ -774,8 +770,7 @@ def render_stock_tab(esg_cutoff: float | None):
                 zorder=4,
             )
             ax3.annotate(
-                "minimum variance
-(all stocks)",
+                "minimum variance\n(all stocks)",
                 xy=(gmv_all["Std Dev"] * 100, gmv_all["Expected Return"] * 100),
                 xytext=(-70, 12),
                 textcoords="offset points",
@@ -784,8 +779,7 @@ def render_stock_tab(esg_cutoff: float | None):
                 arrowprops=dict(arrowstyle="->", color=THEORETICAL_BLUE, lw=1.2),
             )
             ax3.annotate(
-                "minimum variance
-(ESG-screened)",
+                "minimum variance\n(ESG-screened)",
                 xy=(gmv_scr["Std Dev"] * 100, gmv_scr["Expected Return"] * 100),
                 xytext=(16, -18),
                 textcoords="offset points",
