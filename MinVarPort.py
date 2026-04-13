@@ -128,7 +128,9 @@ def onboarding_dialog():
 
     if step == "investor_type":
         st.write("**Are you an experienced investor or a first time user on the app?**")
-        st.caption("This helps EcoVest decide whether to use your own market assumptions or guide you through a simpler route.")
+        st.caption(
+            "This helps EcoVest decide whether to use your own asset assumptions or guide you through a simpler path."
+        )
 
         investment_amount = st.number_input(
             "How much money are you looking to invest (£)?",
@@ -138,7 +140,9 @@ def onboarding_dialog():
             format="%.2f",
             key="dialog_investment_amount",
         )
-        st.caption("This amount does not change the optimal weights. It is used to convert the recommended weights into £ allocations.")
+        st.caption(
+            "This amount does not change the optimal weights. It is used to convert recommendations into £ allocations."
+        )
 
         investor_choice = st.radio(
             "Select one option",
@@ -153,13 +157,17 @@ def onboarding_dialog():
                 st.session_state.investor_type = investor_choice
                 st.session_state.investment_amount = float(investment_amount)
                 st.session_state.onboarding_step = (
-                    "experienced_path" if investor_choice == "Experienced Investor" else "first_time_path"
+                    "experienced_path"
+                    if investor_choice == "Experienced Investor"
+                    else "first_time_path"
                 )
                 st.rerun()
 
     elif step == "experienced_path":
         st.write("**Which best describes what you want to do?**")
-        st.caption("Choose whether you already have your own 2-asset assumptions or whether you want the app to help you find a stock combination from the workbook data.")
+        st.caption(
+            "Choose whether you already have your own 2-asset assumptions or whether you want the app to help you find a stock combination from the workbook."
+        )
 
         asset_choice = st.radio(
             "Select one option",
@@ -190,7 +198,9 @@ def onboarding_dialog():
 
     elif step == "first_time_path":
         st.write("**Choose your risk aversion level**")
-        st.caption("Risk aversion means how uncomfortable you are with investment ups and downs. A higher level means you prefer steadier outcomes and usually take less risk.")
+        st.caption(
+            "Risk aversion means how uncomfortable you are with investment ups and downs. A higher level means you prefer steadier outcomes and usually take less risk."
+        )
 
         risk_choice = st.radio(
             "Risk profile",
@@ -212,7 +222,9 @@ def onboarding_dialog():
 
         st.markdown("---")
         st.write("**Choose your ESG preference level**")
-        st.caption("This tells EcoVest how much you value holding greener assets. A higher value means the app will care more about ESG and less about pure risk-return efficiency.")
+        st.caption(
+            "This tells EcoVest how much you value holding greener assets. A higher value means the app will care more about ESG and less about pure risk-return efficiency."
+        )
 
         esg_choice = st.radio(
             "ESG preference",
@@ -484,10 +496,12 @@ def solve_direction_simplex(
     starts = [np.ones(n_assets) / n_assets]
     starts.append(project_to_simplex(mu - np.min(mu) + 1e-6))
     starts.append(project_to_simplex(esg_scores - np.min(esg_scores) + 1e-6))
+
     for i in range(n_assets):
         e = np.zeros(n_assets)
         e[i] = 1.0
         starts.append(e)
+
     for _ in range(n_random_starts):
         starts.append(rng.dirichlet(np.ones(n_assets)))
 
@@ -561,37 +575,6 @@ def solve_optimal_portfolio(
     ).sort_values("Risky Weight", ascending=False).reset_index(drop=True)
 
     return pd.Series(optimal_row), weight_table
-
-
-def build_two_asset_objective_curve(
-    mu: np.ndarray,
-    sigma: np.ndarray,
-    rho: float,
-    rf: float,
-    esg_scores: np.ndarray,
-    gamma: float,
-    lambda_esg: float,
-    mix_points: int,
-) -> pd.DataFrame:
-    cov = var_covar(sigma, rho)
-    rows = []
-
-    for p1 in np.linspace(0.0, 1.0, mix_points):
-        p = np.array([p1, 1.0 - p1], dtype=float)
-        alpha = optimal_scale_for_direction(p, mu, cov, gamma)
-        x = alpha * p
-        metrics = portfolio_metrics(x, mu, cov, rf, esg_scores, gamma, lambda_esg)
-        rows.append(
-            {
-                "Mix Asset 1": p1,
-                "Mix Asset 2": 1.0 - p1,
-                "x1": float(x[0]),
-                "x2": float(x[1]),
-                **metrics,
-            }
-        )
-
-    return pd.DataFrame(rows)
 
 
 def build_two_asset_risky_frontier(
@@ -755,6 +738,20 @@ def min_esg_cutoff_from_scores(scores: np.ndarray, lambda_esg: float) -> float:
     return float(np.min(scores) + lambda_esg * (np.max(scores) - np.min(scores)))
 
 
+def compact_optimal_summary(case_name: str, optimal_row: pd.Series, investment_amount: float) -> dict:
+    return {
+        "Case": case_name,
+        "Expected Return": float(optimal_row["Expected Return"]),
+        "Std Dev": float(optimal_row["Std Dev"]),
+        "Risky Weight Sum": float(optimal_row["Risky Weight Sum"]),
+        "Risk-free Weight": float(optimal_row["Risk-free Weight"]),
+        "Average ESG": float(optimal_row["Average ESG"]),
+        "Objective": float(optimal_row["Objective"]),
+        "Amount in Risky Assets": float(optimal_row["Risky Weight Sum"]) * investment_amount,
+        "Amount in Risk-free Asset": float(optimal_row["Risk-free Weight"]) * investment_amount,
+    }
+
+
 def audit_two_asset_solution(
     mu: np.ndarray,
     sigma: np.ndarray,
@@ -808,10 +805,12 @@ def audit_two_asset_solution(
     corner_x = np.zeros(2)
     corner_x[greener_idx] = optimal_scale_for_direction(np.eye(2)[greener_idx], mu, cov, gamma)
     corner_obj = objective_value(corner_x, mu, cov, gamma, lambda_esg, esg_scores)
-    interior_x = np.array([
-        float(opt_with_lambda["Weight Asset 1"]),
-        float(opt_with_lambda["Weight Asset 2"]),
-    ])
+    interior_x = np.array(
+        [
+            float(opt_with_lambda["Weight Asset 1"]),
+            float(opt_with_lambda["Weight Asset 2"]),
+        ]
+    )
     interior_obj = objective_value(interior_x, mu, cov, gamma, lambda_esg, esg_scores)
 
     identical_mu = np.array([mu[0], mu[0]])
@@ -996,8 +995,10 @@ def render_theoretical_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg, mi
     )
 
 
-
 def render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg, mix_points):
+    investment_amount = float(st.session_state.investment_amount)
+
+    # Stock-based visuals for first-time users and "find assets" users
     if st.session_state.beginner_mode or is_experienced_find_mode():
         try:
             firms, daily_cov, corr = load_fast_workbook()
@@ -1016,7 +1017,7 @@ def render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg
 
             st.subheader("Frontier and CML visualisation")
             st.caption(
-                "These graphs are built from all stocks in the workbook. The ESG frontier uses only stocks that meet the minimum ESG criterion implied by your ESG preference."
+                "These graphs are built from all stocks in the workbook. The ESG frontier uses only the stocks that meet the minimum ESG criterion implied by your ESG preference."
             )
             st.write(f"Stocks available in workbook: **{len(firms)}**")
             st.write(f"Stocks meeting ESG cutoff: **{len(firms_esg)}**")
@@ -1035,9 +1036,17 @@ def render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg
             tan_esg = tangency_from_frontier(frontier_esg)
             mvp_esg = min_variance_from_frontier(frontier_esg)
 
+            # Graph 1: all stocks
             fig1, ax1 = plt.subplots(figsize=(10, 6))
             plot_frontier_cml(ax1, frontier_all, rf, THEORETICAL_BLUE, "highest Sharpe portfolio")
-            ax1.scatter([mvp_all["Std Dev"] * 100], [mvp_all["Risky Return"] * 100], color=THEORETICAL_BLUE, marker="s", s=55, zorder=5)
+            ax1.scatter(
+                [mvp_all["Std Dev"] * 100],
+                [mvp_all["Risky Return"] * 100],
+                color=THEORETICAL_BLUE,
+                marker="s",
+                s=55,
+                zorder=5,
+            )
             ax1.annotate(
                 "minimum variance portfolio",
                 xy=(mvp_all["Std Dev"] * 100, mvp_all["Risky Return"] * 100),
@@ -1053,10 +1062,24 @@ def render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg
             style_axis(ax1)
             st.pyplot(fig1)
 
+            # Graph 2: ESG-screened stocks
             fig2, ax2 = plt.subplots(figsize=(10, 6))
-            ax2.plot(frontier_all["Std Dev"] * 100, frontier_all["Risky Return"] * 100, color=THEORETICAL_BLUE, linewidth=2.1, alpha=0.7)
+            ax2.plot(
+                frontier_all["Std Dev"] * 100,
+                frontier_all["Risky Return"] * 100,
+                color=THEORETICAL_BLUE,
+                linewidth=2.1,
+                alpha=0.7,
+            )
             plot_frontier_cml(ax2, frontier_esg, rf, ESG_GREEN, "ESG highest Sharpe portfolio")
-            ax2.scatter([mvp_esg["Std Dev"] * 100], [mvp_esg["Risky Return"] * 100], color=ESG_GREEN, marker="s", s=55, zorder=5)
+            ax2.scatter(
+                [mvp_esg["Std Dev"] * 100],
+                [mvp_esg["Risky Return"] * 100],
+                color=ESG_GREEN,
+                marker="s",
+                s=55,
+                zorder=5,
+            )
             ax2.annotate(
                 "ESG minimum variance portfolio",
                 xy=(mvp_esg["Std Dev"] * 100, mvp_esg["Risky Return"] * 100),
@@ -1072,37 +1095,135 @@ def render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg
             style_axis(ax2)
             st.pyplot(fig2)
 
+            # Graph 3: compare MVP and highest Sharpe
             fig3, ax3 = plt.subplots(figsize=(10, 6))
-            ax3.plot(frontier_all["Std Dev"] * 100, frontier_all["Risky Return"] * 100, color=THEORETICAL_BLUE, linewidth=2.2)
-            ax3.plot(frontier_esg["Std Dev"] * 100, frontier_esg["Risky Return"] * 100, color=ESG_GREEN, linewidth=2.2)
-            ax3.scatter([mvp_all["Std Dev"] * 100], [mvp_all["Risky Return"] * 100], color=THEORETICAL_BLUE, marker="s", s=60, zorder=5)
-            ax3.scatter([tan_all["Std Dev"] * 100], [tan_all["Risky Return"] * 100], color=THEORETICAL_BLUE, marker="*", s=110, zorder=5)
-            ax3.scatter([mvp_esg["Std Dev"] * 100], [mvp_esg["Risky Return"] * 100], color=ESG_GREEN, marker="s", s=60, zorder=5)
-            ax3.scatter([tan_esg["Std Dev"] * 100], [tan_esg["Risky Return"] * 100], color=ESG_GREEN, marker="*", s=110, zorder=5)
-            ax3.annotate("MVP without ESG", xy=(mvp_all["Std Dev"] * 100, mvp_all["Risky Return"] * 100), xytext=(14, -18), textcoords="offset points", color=THEORETICAL_BLUE, fontsize=9)
-            ax3.annotate("Highest Sharpe without ESG", xy=(tan_all["Std Dev"] * 100, tan_all["Risky Return"] * 100), xytext=(-120, 10), textcoords="offset points", color=THEORETICAL_BLUE, fontsize=9)
-            ax3.annotate("MVP with ESG", xy=(mvp_esg["Std Dev"] * 100, mvp_esg["Risky Return"] * 100), xytext=(14, 8), textcoords="offset points", color=ESG_GREEN, fontsize=9)
-            ax3.annotate("Highest Sharpe with ESG", xy=(tan_esg["Std Dev"] * 100, tan_esg["Risky Return"] * 100), xytext=(16, -16), textcoords="offset points", color=ESG_GREEN, fontsize=9)
+            ax3.plot(
+                frontier_all["Std Dev"] * 100,
+                frontier_all["Risky Return"] * 100,
+                color=THEORETICAL_BLUE,
+                linewidth=2.2,
+            )
+            ax3.plot(
+                frontier_esg["Std Dev"] * 100,
+                frontier_esg["Risky Return"] * 100,
+                color=ESG_GREEN,
+                linewidth=2.2,
+            )
+            ax3.scatter(
+                [mvp_all["Std Dev"] * 100],
+                [mvp_all["Risky Return"] * 100],
+                color=THEORETICAL_BLUE,
+                marker="s",
+                s=60,
+                zorder=5,
+            )
+            ax3.scatter(
+                [tan_all["Std Dev"] * 100],
+                [tan_all["Risky Return"] * 100],
+                color=THEORETICAL_BLUE,
+                marker="*",
+                s=110,
+                zorder=5,
+            )
+            ax3.scatter(
+                [mvp_esg["Std Dev"] * 100],
+                [mvp_esg["Risky Return"] * 100],
+                color=ESG_GREEN,
+                marker="s",
+                s=60,
+                zorder=5,
+            )
+            ax3.scatter(
+                [tan_esg["Std Dev"] * 100],
+                [tan_esg["Risky Return"] * 100],
+                color=ESG_GREEN,
+                marker="*",
+                s=110,
+                zorder=5,
+            )
+            ax3.annotate(
+                "MVP without ESG",
+                xy=(mvp_all["Std Dev"] * 100, mvp_all["Risky Return"] * 100),
+                xytext=(14, -18),
+                textcoords="offset points",
+                color=THEORETICAL_BLUE,
+                fontsize=9,
+            )
+            ax3.annotate(
+                "Highest Sharpe without ESG",
+                xy=(tan_all["Std Dev"] * 100, tan_all["Risky Return"] * 100),
+                xytext=(-120, 10),
+                textcoords="offset points",
+                color=THEORETICAL_BLUE,
+                fontsize=9,
+            )
+            ax3.annotate(
+                "MVP with ESG",
+                xy=(mvp_esg["Std Dev"] * 100, mvp_esg["Risky Return"] * 100),
+                xytext=(14, 8),
+                textcoords="offset points",
+                color=ESG_GREEN,
+                fontsize=9,
+            )
+            ax3.annotate(
+                "Highest Sharpe with ESG",
+                xy=(tan_esg["Std Dev"] * 100, tan_esg["Risky Return"] * 100),
+                xytext=(16, -16),
+                textcoords="offset points",
+                color=ESG_GREEN,
+                fontsize=9,
+            )
             ax3.set_xlabel("Std")
             ax3.set_ylabel("Expected return")
             ax3.set_title("Minimum variance and highest Sharpe portfolios")
             style_axis(ax3)
             st.pyplot(fig3)
 
-            benchmark_opt, _ = solve_optimal_portfolio(mu_all, cov_all, esg_all, gamma, 0.0, rf, asset_names_all)
-            esg_opt, _ = solve_optimal_portfolio(mu_all, cov_all, esg_all, gamma, lambda_esg, rf, asset_names_all)
-            compare_df = pd.DataFrame([
-                {"Case": "Objective-optimal without ESG taste", **add_currency_columns(benchmark_opt, float(st.session_state.investment_amount))},
-                {"Case": "Objective-optimal with ESG taste", **add_currency_columns(esg_opt, float(st.session_state.investment_amount))},
-            ])
+            benchmark_opt, _ = solve_optimal_portfolio(
+                mu_all, cov_all, esg_all, gamma, 0.0, rf, asset_names_all
+            )
+            esg_opt, _ = solve_optimal_portfolio(
+                mu_all, cov_all, esg_all, gamma, lambda_esg, rf, asset_names_all
+            )
+
+            compare_df = pd.DataFrame(
+                [
+                    compact_optimal_summary(
+                        "Objective-optimal without ESG taste",
+                        benchmark_opt,
+                        investment_amount,
+                    ),
+                    compact_optimal_summary(
+                        "Objective-optimal with ESG taste",
+                        esg_opt,
+                        investment_amount,
+                    ),
+                ]
+            )
+
             st.subheader("Optimal portfolio details for comparison")
-            st.dataframe(format_optimal_summary(compare_df), use_container_width=True)
+            st.dataframe(
+                compare_df.style.format(
+                    {
+                        "Expected Return": "{:.2%}",
+                        "Std Dev": "{:.2%}",
+                        "Risky Weight Sum": "{:.3f}",
+                        "Risk-free Weight": "{:.3f}",
+                        "Average ESG": "{:.2%}",
+                        "Objective": "{:.4f}",
+                        "Amount in Risky Assets": "£{:,.2f}",
+                        "Amount in Risk-free Asset": "£{:,.2f}",
+                    }
+                ),
+                use_container_width=True,
+            )
             return
 
         except Exception as e:
             st.error(f"Could not build the frontier visualisation from the workbook: {e}")
             return
 
+    # Theoretical visuals for experienced users with their own 2-asset inputs
     cov = var_covar(sigma, rho)
     benchmark_opt, _ = solve_optimal_portfolio(mu, cov, esg_scores, gamma, 0.0, rf, ["Asset 1", "Asset 2"])
     esg_opt, _ = solve_optimal_portfolio(mu, cov, esg_scores, gamma, lambda_esg, rf, ["Asset 1", "Asset 2"])
@@ -1123,8 +1244,21 @@ def render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg
 
     fig1, ax1 = plt.subplots(figsize=(10, 6))
     plot_frontier_cml(ax1, frontier_all, rf, THEORETICAL_BLUE, "highest Sharpe portfolio")
-    ax1.scatter([benchmark_opt["Std Dev"] * 100], [benchmark_opt["Expected Return"] * 100], color=THEORETICAL_BLUE, s=65, zorder=5)
-    ax1.scatter([mvp_all["Std Dev"] * 100], [mvp_all["Risky Return"] * 100], color=THEORETICAL_BLUE, marker="s", s=55, zorder=5)
+    ax1.scatter(
+        [benchmark_opt["Std Dev"] * 100],
+        [benchmark_opt["Expected Return"] * 100],
+        color=THEORETICAL_BLUE,
+        s=65,
+        zorder=5,
+    )
+    ax1.scatter(
+        [mvp_all["Std Dev"] * 100],
+        [mvp_all["Risky Return"] * 100],
+        color=THEORETICAL_BLUE,
+        marker="s",
+        s=55,
+        zorder=5,
+    )
     ax1.annotate(
         "objective-optimal portfolio",
         xy=(benchmark_opt["Std Dev"] * 100, benchmark_opt["Expected Return"] * 100),
@@ -1150,10 +1284,29 @@ def render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg
     st.pyplot(fig1)
 
     fig2, ax2 = plt.subplots(figsize=(10, 6))
-    ax2.plot(frontier_all["Std Dev"] * 100, frontier_all["Risky Return"] * 100, color=THEORETICAL_BLUE, linewidth=2.1, alpha=0.7)
+    ax2.plot(
+        frontier_all["Std Dev"] * 100,
+        frontier_all["Risky Return"] * 100,
+        color=THEORETICAL_BLUE,
+        linewidth=2.1,
+        alpha=0.7,
+    )
     plot_frontier_cml(ax2, frontier_esg, rf, ESG_GREEN, "ESG highest Sharpe portfolio")
-    ax2.scatter([esg_opt["Std Dev"] * 100], [esg_opt["Expected Return"] * 100], color=ESG_GREEN, s=65, zorder=5)
-    ax2.scatter([mvp_esg["Std Dev"] * 100], [mvp_esg["Risky Return"] * 100], color=ESG_GREEN, marker="s", s=55, zorder=5)
+    ax2.scatter(
+        [esg_opt["Std Dev"] * 100],
+        [esg_opt["Expected Return"] * 100],
+        color=ESG_GREEN,
+        s=65,
+        zorder=5,
+    )
+    ax2.scatter(
+        [mvp_esg["Std Dev"] * 100],
+        [mvp_esg["Risky Return"] * 100],
+        color=ESG_GREEN,
+        marker="s",
+        s=55,
+        zorder=5,
+    )
     ax2.annotate(
         "objective-optimal portfolio",
         xy=(esg_opt["Std Dev"] * 100, esg_opt["Expected Return"] * 100),
@@ -1179,22 +1332,87 @@ def render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg
     st.pyplot(fig2)
 
     fig3, ax3 = plt.subplots(figsize=(10, 6))
-    ax3.plot(frontier_all["Std Dev"] * 100, frontier_all["Risky Return"] * 100, color=THEORETICAL_BLUE, linewidth=2.2)
-    ax3.plot(frontier_esg["Std Dev"] * 100, frontier_esg["Risky Return"] * 100, color=ESG_GREEN, linewidth=2.2)
-    ax3.scatter([mvp_all["Std Dev"] * 100], [mvp_all["Risky Return"] * 100], color=THEORETICAL_BLUE, marker="s", s=60, zorder=5)
-    ax3.scatter([tan_all["Std Dev"] * 100], [tan_all["Risky Return"] * 100], color=THEORETICAL_BLUE, marker="*", s=110, zorder=5)
-    ax3.scatter([mvp_esg["Std Dev"] * 100], [mvp_esg["Risky Return"] * 100], color=ESG_GREEN, marker="s", s=60, zorder=5)
-    ax3.scatter([tan_esg["Std Dev"] * 100], [tan_esg["Risky Return"] * 100], color=ESG_GREEN, marker="*", s=110, zorder=5)
-    ax3.annotate("MVP without ESG", xy=(mvp_all["Std Dev"] * 100, mvp_all["Risky Return"] * 100), xytext=(14, -18), textcoords="offset points", color=THEORETICAL_BLUE, fontsize=9)
-    ax3.annotate("Highest Sharpe without ESG", xy=(tan_all["Std Dev"] * 100, tan_all["Risky Return"] * 100), xytext=(-120, 10), textcoords="offset points", color=THEORETICAL_BLUE, fontsize=9)
-    ax3.annotate("MVP with ESG", xy=(mvp_esg["Std Dev"] * 100, mvp_esg["Risky Return"] * 100), xytext=(14, 8), textcoords="offset points", color=ESG_GREEN, fontsize=9)
-    ax3.annotate("Highest Sharpe with ESG", xy=(tan_esg["Std Dev"] * 100, tan_esg["Risky Return"] * 100), xytext=(16, -16), textcoords="offset points", color=ESG_GREEN, fontsize=9)
+    ax3.plot(
+        frontier_all["Std Dev"] * 100,
+        frontier_all["Risky Return"] * 100,
+        color=THEORETICAL_BLUE,
+        linewidth=2.2,
+    )
+    ax3.plot(
+        frontier_esg["Std Dev"] * 100,
+        frontier_esg["Risky Return"] * 100,
+        color=ESG_GREEN,
+        linewidth=2.2,
+    )
+    ax3.scatter(
+        [mvp_all["Std Dev"] * 100],
+        [mvp_all["Risky Return"] * 100],
+        color=THEORETICAL_BLUE,
+        marker="s",
+        s=60,
+        zorder=5,
+    )
+    ax3.scatter(
+        [tan_all["Std Dev"] * 100],
+        [tan_all["Risky Return"] * 100],
+        color=THEORETICAL_BLUE,
+        marker="*",
+        s=110,
+        zorder=5,
+    )
+    ax3.scatter(
+        [mvp_esg["Std Dev"] * 100],
+        [mvp_esg["Risky Return"] * 100],
+        color=ESG_GREEN,
+        marker="s",
+        s=60,
+        zorder=5,
+    )
+    ax3.scatter(
+        [tan_esg["Std Dev"] * 100],
+        [tan_esg["Risky Return"] * 100],
+        color=ESG_GREEN,
+        marker="*",
+        s=110,
+        zorder=5,
+    )
+    ax3.annotate(
+        "MVP without ESG",
+        xy=(mvp_all["Std Dev"] * 100, mvp_all["Risky Return"] * 100),
+        xytext=(14, -18),
+        textcoords="offset points",
+        color=THEORETICAL_BLUE,
+        fontsize=9,
+    )
+    ax3.annotate(
+        "Highest Sharpe without ESG",
+        xy=(tan_all["Std Dev"] * 100, tan_all["Risky Return"] * 100),
+        xytext=(-120, 10),
+        textcoords="offset points",
+        color=THEORETICAL_BLUE,
+        fontsize=9,
+    )
+    ax3.annotate(
+        "MVP with ESG",
+        xy=(mvp_esg["Std Dev"] * 100, mvp_esg["Risky Return"] * 100),
+        xytext=(14, 8),
+        textcoords="offset points",
+        color=ESG_GREEN,
+        fontsize=9,
+    )
+    ax3.annotate(
+        "Highest Sharpe with ESG",
+        xy=(tan_esg["Std Dev"] * 100, tan_esg["Risky Return"] * 100),
+        xytext=(16, -16),
+        textcoords="offset points",
+        color=ESG_GREEN,
+        fontsize=9,
+    )
     ax3.set_xlabel("Std")
     ax3.set_ylabel("Expected return")
     ax3.set_title("Minimum variance and highest Sharpe portfolios")
     style_axis(ax3)
     st.pyplot(fig3)
-
 
 
 def render_stock_tab(lambda_esg: float, gamma: float, rf: float):
@@ -1240,8 +1458,12 @@ def render_stock_tab(lambda_esg: float, gamma: float, rf: float):
         )
 
         p_cloud = sample_simplex_cloud(len(names), st.session_state.sample_points)
-        cloud_benchmark = build_stock_objective_cloud(p_cloud, mu, cov, rf, esg_scores, gamma, 0.0)
-        cloud_esg = build_stock_objective_cloud(p_cloud, mu, cov, rf, esg_scores, gamma, lambda_esg)
+        cloud_benchmark = build_stock_objective_cloud(
+            p_cloud, mu, cov, rf, esg_scores, gamma, 0.0
+        )
+        cloud_esg = build_stock_objective_cloud(
+            p_cloud, mu, cov, rf, esg_scores, gamma, lambda_esg
+        )
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Stocks in universe", f"{len(firms)}")
@@ -1292,8 +1514,7 @@ def render_stock_tab(lambda_esg: float, gamma: float, rf: float):
             zorder=5,
         )
         ax.annotate(
-            "benchmark optimum" + "
-" + "(λ = 0)",
+            "benchmark optimum\n(lambda = 0)",
             xy=(benchmark_opt["Std Dev"] * 100, benchmark_opt["Expected Return"] * 100),
             xytext=(-70, 12),
             textcoords="offset points",
@@ -1348,7 +1569,7 @@ def render_stock_tab(lambda_esg: float, gamma: float, rf: float):
 
 
 # =========================================================
-# Force questionnaire only after landing page
+# Questionnaire gate
 # =========================================================
 if st.session_state.page == "questionnaire" and not st.session_state.onboarding_complete:
     onboarding_dialog()
@@ -1394,6 +1615,7 @@ if st.session_state.page == "intro":
 # =========================================================
 elif st.session_state.page == "credits":
     st.title("EcoVest Contributions")
+
     credits_df = pd.DataFrame(
         [
             {
@@ -1457,7 +1679,9 @@ elif st.session_state.page == "inputs":
 
         with st.form("stock_finder_form"):
             st.subheader("Choose your risk aversion level")
-            st.caption("Risk aversion measures how much you dislike uncertainty. A higher value means you prefer steadier outcomes and are likely to hold less risky exposure overall.")
+            st.caption(
+                "Risk aversion measures how much you dislike uncertainty. A higher value means you prefer steadier outcomes and are likely to hold less risky exposure overall."
+            )
             risk_choice = st.radio(
                 "How risk averse are you?",
                 ["Aggressive", "Balanced", "Conservative", "Custom"],
@@ -1483,7 +1707,9 @@ elif st.session_state.page == "inputs":
 
             st.markdown("---")
             st.subheader("Choose your ESG preference level")
-            st.caption("This controls how strongly EcoVest prioritises greener assets. Higher values give more importance to ESG and less to pure efficiency.")
+            st.caption(
+                "This controls how strongly EcoVest prioritises greener assets. Higher values give more importance to ESG and less to pure efficiency."
+            )
             esg_choice = st.radio(
                 "Please select a number that reflects your ESG preferences:",
                 ["Low ESG Impact", "Medium ESG Impact", "High ESG Impact", "Custom"],
@@ -1634,7 +1860,9 @@ elif st.session_state.page == "inputs":
             st.markdown("---")
 
             st.subheader("Investor preferences")
-            st.caption("Risk aversion measures how strongly you penalise volatility. Please enter a value between 0.1 and 10.0.")
+            st.caption(
+                "Risk aversion measures how strongly you penalise volatility. Please enter a value between 0.1 and 10.0."
+            )
             gamma = st.number_input(
                 "Risk aversion γ",
                 min_value=0.1,
@@ -1643,7 +1871,10 @@ elif st.session_state.page == "inputs":
                 step=0.10,
                 format="%.2f",
             )
-            st.caption("ESG preference intensity shows how strongly you value greener assets. Please enter a value between 0.0 and 1.0.")
+
+            st.caption(
+                "ESG preference intensity shows how strongly you value greener assets. Please enter a value between 0.0 and 1.0."
+            )
             lambda_esg = st.slider(
                 "ESG preference intensity λ",
                 0.0,
@@ -1746,6 +1977,7 @@ elif st.session_state.page == "results":
             render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg, mix_points)
         with tab2:
             render_stock_tab(lambda_esg=lambda_esg, gamma=gamma, rf=rf)
+
     elif show_theoretical:
         tab1, tab_frontier = st.tabs(
             [
@@ -1757,6 +1989,7 @@ elif st.session_state.page == "results":
             render_theoretical_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg, mix_points)
         with tab_frontier:
             render_frontier_visual_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg, mix_points)
+
     elif show_stock:
         tab_frontier, tab2 = st.tabs(
             [
