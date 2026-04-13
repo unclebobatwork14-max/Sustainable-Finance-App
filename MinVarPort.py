@@ -1371,4 +1371,3 @@ elif st.session_state.page == "results":
     with col3:
         if st.button("Stay on results"):
             st.rerun()
-            
