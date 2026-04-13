@@ -33,6 +33,7 @@ DEFAULTS = {
     "risk_profile": None,
     "esg_profile": None,
     "beginner_mode": False,
+    "investment_amount": 10000.0,
 }
 
 for k, v in DEFAULTS.items():
@@ -93,6 +94,28 @@ def is_experienced_find_mode() -> bool:
     )
 
 
+def format_gbp(value: float) -> str:
+    sign = "-" if value < 0 else ""
+    return f"{sign}£{abs(value):,.2f}"
+
+
+def add_currency_columns(optimal_row: pd.Series, investment_amount: float) -> pd.Series:
+    out = optimal_row.copy()
+    weight_cols = [c for c in out.index if c.startswith("Weight ")]
+    for col in weight_cols:
+        asset_name = col.replace("Weight ", "", 1)
+        out[f"Amount {asset_name}"] = float(out[col]) * investment_amount
+    out["Amount in Risky Assets"] = float(out["Risky Weight Sum"]) * investment_amount
+    out["Amount in Risk-free Asset"] = float(out["Risk-free Weight"]) * investment_amount
+    return out
+
+
+def add_currency_to_weight_table(weight_table: pd.DataFrame, investment_amount: float) -> pd.DataFrame:
+    out = weight_table.copy()
+    out["Amount Invested"] = out["Risky Weight"] * investment_amount
+    return out
+
+
 def apply_first_time_choices(
     risk_choice: str,
     esg_choice: str,
@@ -119,6 +142,14 @@ def onboarding_dialog():
 
     if step == "investor_type":
         st.write("**Are you an experienced investor or a first time user on the app?**")
+        investment_amount = st.number_input(
+            "How much money are you looking to invest (£)?",
+            min_value=0.0,
+            value=float(st.session_state.investment_amount),
+            step=100.0,
+            format="%.2f",
+            key="dialog_investment_amount",
+        )
         investor_choice = st.radio(
             "Select one option",
             ["Experienced Investor", "New to Investing/First Time User"],
@@ -130,6 +161,7 @@ def onboarding_dialog():
         with c2:
             if st.button("Continue", use_container_width=True, key="continue_investor_type"):
                 st.session_state.investor_type = investor_choice
+                st.session_state.investment_amount = float(investment_amount)
                 st.session_state.onboarding_step = (
                     "experienced_path" if investor_choice == "Experienced Investor" else "first_time_path"
                 )
@@ -690,6 +722,9 @@ def format_optimal_summary(df: pd.DataFrame):
     format_map = {
         col: "{:.3f}" for col in df.columns if col.startswith("Weight ")
     }
+    format_map.update({
+        col: "£{:,.2f}" for col in df.columns if col.startswith("Amount ")
+    })
     format_map.update(
         {
             "Expected Return": "{:.2%}",
@@ -706,20 +741,22 @@ def format_optimal_summary(df: pd.DataFrame):
 
 
 def format_weight_table(df: pd.DataFrame):
-    return df.style.format(
-        {
-            "Risky Weight": "{:.3f}",
-            "Direction Share (within risky assets)": "{:.2%}",
-            "ESG Score": "{:.2%}",
-            "Expected Return": "{:.2%}",
-        }
-    )
+    format_map = {
+        "Risky Weight": "{:.3f}",
+        "Direction Share (within risky assets)": "{:.2%}",
+        "ESG Score": "{:.2%}",
+        "Expected Return": "{:.2%}",
+    }
+    if "Amount Invested" in df.columns:
+        format_map["Amount Invested"] = "£{:,.2f}"
+    return df.style.format(format_map)
 
 
 # =========================================================
 # Rendering helpers
 # =========================================================
 def render_theoretical_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg, mix_points):
+    investment_amount = float(st.session_state.investment_amount)
     cov = var_covar(sigma, rho)
 
     benchmark_opt, benchmark_weights = solve_optimal_portfolio(
@@ -752,10 +789,12 @@ def render_theoretical_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg, mi
     m4.metric("ESG-optimal risky sum", f"{esg_opt['Risky Weight Sum']:.3f}")
 
     st.subheader("Objective-optimal portfolio: λ = 0 benchmark")
-    st.dataframe(format_optimal_summary(pd.DataFrame([benchmark_opt])), use_container_width=True)
+    benchmark_display = add_currency_columns(benchmark_opt, investment_amount)
+    st.dataframe(format_optimal_summary(pd.DataFrame([benchmark_display])), use_container_width=True)
 
     st.subheader("Objective-optimal portfolio: chosen ESG taste")
-    st.dataframe(format_optimal_summary(pd.DataFrame([esg_opt])), use_container_width=True)
+    esg_display = add_currency_columns(esg_opt, investment_amount)
+    st.dataframe(format_optimal_summary(pd.DataFrame([esg_display])), use_container_width=True)
 
     st.subheader("Audit checks")
     st.dataframe(
@@ -835,14 +874,15 @@ def render_theoretical_tab(mu, sigma, rho, rf, esg_scores, gamma, lambda_esg, mi
     st.pyplot(fig)
 
     st.subheader("Risky-asset weights: λ = 0 benchmark")
-    st.dataframe(format_weight_table(benchmark_weights), use_container_width=True)
+    st.dataframe(format_weight_table(add_currency_to_weight_table(benchmark_weights, investment_amount)), use_container_width=True)
 
     st.subheader("Risky-asset weights: chosen ESG taste")
-    st.dataframe(format_weight_table(esg_weights), use_container_width=True)
+    st.dataframe(format_weight_table(add_currency_to_weight_table(esg_weights, investment_amount)), use_container_width=True)
 
 
 
 def render_stock_tab(lambda_esg: float, gamma: float, rf: float):
+    investment_amount = float(st.session_state.investment_amount)
     st.subheader("Stock-universe objective optimisation")
     st.markdown(
         """
@@ -893,10 +933,12 @@ def render_stock_tab(lambda_esg: float, gamma: float, rf: float):
         m4.metric("ESG-optimal risky sum", f"{esg_opt['Risky Weight Sum']:.3f}")
 
         st.subheader("Objective-optimal stock portfolio: λ = 0 benchmark")
-        st.dataframe(format_optimal_summary(pd.DataFrame([benchmark_opt])), use_container_width=True)
+        benchmark_display = add_currency_columns(benchmark_opt, investment_amount)
+        st.dataframe(format_optimal_summary(pd.DataFrame([benchmark_display])), use_container_width=True)
 
         st.subheader("Objective-optimal stock portfolio: chosen ESG taste")
-        st.dataframe(format_optimal_summary(pd.DataFrame([esg_opt])), use_container_width=True)
+        esg_display = add_currency_columns(esg_opt, investment_amount)
+        st.dataframe(format_optimal_summary(pd.DataFrame([esg_display])), use_container_width=True)
 
         st.subheader("Stock-universe objective plot")
         fig, ax = plt.subplots(figsize=(11, 6))
@@ -952,10 +994,10 @@ def render_stock_tab(lambda_esg: float, gamma: float, rf: float):
         st.pyplot(fig)
 
         st.subheader("Top stock weights: λ = 0 benchmark")
-        st.dataframe(format_weight_table(benchmark_weights.head(15)), use_container_width=True)
+        st.dataframe(format_weight_table(add_currency_to_weight_table(benchmark_weights.head(15), investment_amount)), use_container_width=True)
 
         st.subheader("Top stock weights: chosen ESG taste")
-        st.dataframe(format_weight_table(esg_weights.head(15)), use_container_width=True)
+        st.dataframe(format_weight_table(add_currency_to_weight_table(esg_weights.head(15), investment_amount)), use_container_width=True)
 
         c1, c2 = st.columns(2)
         with c1:
@@ -1237,6 +1279,8 @@ if st.session_state.page == "inputs":
 # =========================================================
 elif st.session_state.page == "results":
     st.title("Results")
+
+    st.caption(f"Investment amount entered in questionnaire: {format_gbp(float(st.session_state.investment_amount))}")
 
     show_theoretical = is_experienced_existing_mode() or st.session_state.beginner_mode
     show_stock = is_experienced_find_mode() or st.session_state.beginner_mode
