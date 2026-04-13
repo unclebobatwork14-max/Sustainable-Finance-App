@@ -629,7 +629,8 @@ def render_theoretical_tab(
     ax2.scatter([mvp_esg["Std Dev"] * 100], [mvp_esg["Expected Return"] * 100], color=ESG_GREEN, s=45, zorder=4)
 
     ax2.annotate(
-        "tangency portfolio/n (all assets)",
+        "tangency portfolio
+(all assets)",
         xy=(tan_std["Std Dev"] * 100, tan_std["Expected Return"] * 100),
         xytext=(-80, 10),
         textcoords="offset points",
